@@ -289,10 +289,6 @@ to setup-map
   set maps "tibervalley3.png"
   let map-found? true
   
-  ;; IMPORTANT: In Map mode, we must define what a patch represents 
-  ;; so the movement logic doesn't break.
-  ;set meters-per-patch 100 ;; Match this to your CSV scale
-  
   carefully [
     import-pcolors maps
   ] [
@@ -672,9 +668,9 @@ reset-ticks</button>
     <slider x="55" step="0.5" y="195" max="3.0" width="250" display="beta-exponent" height="50" min="0.0" direction="Horizontal" default="2.0" variable="beta-exponent"></slider>
     <slider x="55" step="1.0" y="135" max="3.0" width="250" display="alpha-exponent" height="50" min="0.0" direction="Horizontal" default="2.0" variable="alpha-exponent"></slider>
     <slider x="55" step="0.0001" y="250" max="0.005" width="250" display="distance-decay-lambda" height="50" min="0.0001" direction="Horizontal" default="7.0E-4" variable="distance-decay-lambda"></slider>
-    <slider x="50" step="0.01" y="380" max="1" width="250" display="social-weight" height="50" min="0.0" direction="Horizontal" default="0.86" variable="social-weight"></slider>
+    <slider x="50" step="0.01" y="380" max="1" width="250" display="social-weight" height="50" min="0.0" direction="Horizontal" default="0.14" variable="social-weight"></slider>
     <slider x="55" step="0.1" y="305" max="3" width="250" display="gamma" height="50" min="0" direction="Horizontal" default="2.3" variable="gamma"></slider>
-    <slider x="50" step="1" y="445" max="100" width="250" display="movement-probability" height="50" min="0" direction="Horizontal" default="88.0" variable="movement-probability"></slider>
+    <slider x="50" step="1" y="445" max="100" width="250" display="movement-probability" height="50" min="0" direction="Horizontal" default="26.0" variable="movement-probability"></slider>
     <button x="50" y="580" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="115">setup</button>
     <button x="190" y="585" height="40" disableUntilTicks="false" forever="true" kind="Observer" width="55">go</button>
     <button x="210" y="705" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="95">clear-drawing
