@@ -1,0 +1,1973 @@
+<?xml version="1.0" encoding="utf-8"?>
+<model version="NetLogo 7.0.3" snapToGrid="true">
+  <code><![CDATA[extensions [csv rnd]
+
+breed [sites site]
+breed [travellers traveller]
+directed-link-breed [connections connection]
+
+globals [
+  min-easting
+  min-northing
+  meters-per-patch
+  area-max-val
+  area-min-val
+  ;;for old travellersim maps
+  maps  ;; This should hold the filename/path string
+  scale 
+
+]
+
+sites-own [
+  site-id
+  initial-area
+  scaled-area
+  importance       ;; W in Rihll-Wilson — site size/benefit
+  visitors-count           ;; Analytical Tij sum for this site as destination j
+  base-color
+]
+
+travellers-own [
+  current-site
+  target-site
+  is-traveling?
+  last-importance-seen 
+  my-home
+]
+
+connections-own [
+  travel-count
+]
+
+patches-own [ 
+  load-checked? 
+]
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SLIDER PARAMETERS (define in Interface tab)
+;;
+;;   alpha-exponent       [0.0 – 3.0, default 1.0]  Origin W exponent (Wᵢᵅ)
+;;   beta-exponent        [0.0 – 3.0, default 1.0]  Destination W exponent (Wⱼᵝ)
+;;   distance-decay-lambda [0.0 – 1.0, default 0.05] λ in exp(−λ·d) decay
+;;   gamma                [0.0 – 100, default 10]    Feedback speed ε = gamma/100
+;;   social-weight        [0.0 – 2.0, default 0.5]   Maintenance cost κ
+;;   movement-probability [0.0 – 100, default 5]     Chance traveller moves per tick (visual only)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SETUP
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to setup
+  clear-all
+  ask patches [ set pcolor white ]
+  set meters-per-patch 100
+
+  let csv-file "sites-short-data.csv"
+  if not file-exists? csv-file [ user-message "CSV file not found!" stop ]
+  let raw-data but-first csv:from-file csv-file
+
+  set area-max-val max map [ row -> item 3 row ] raw-data
+  set area-min-val min map [ row -> item 3 row ] raw-data
+
+  let eastings  map [ row -> item 1 row ] raw-data
+  let northings map [ row -> item 2 row ] raw-data
+  set min-easting  min eastings
+  set min-northing min northings
+
+  resize-world 0 (round ((max eastings - min-easting)  / meters-per-patch) + 20)
+               0 (round ((max northings - min-northing) / meters-per-patch) + 20)
+  set-patch-size (700 / max-pxcor)
+
+  foreach raw-data [ row ->
+    create-sites 1 [
+      set site-id      (item 0 row)
+      set initial-area (item 3 row)
+      set scaled-area  100 * (initial-area - area-min-val) / ((area-max-val - area-min-val) + 0.1)
+
+      setxy ((item 1 row) - min-easting)  / meters-per-patch
+            ((item 2 row) - min-northing) / meters-per-patch
+
+      set shape "house"
+      let assigned-hue (5 + (who * 17) mod 130)
+      set base-color   assigned-hue
+      set color        base-color
+      set importance scaled-area   ;; Wⱼ initialised from physical area
+
+      ;; Spawn visual travellers proportional to initial area
+      let initial-pop max (list 1 (round (initial-area / 200)))
+      hatch-travellers initial-pop [
+        set shape "person"
+        ;set color yellow
+        set size  1.5
+        set current-site myself
+        set my-home myself
+        set is-traveling? false
+        set last-importance-seen [importance] of myself
+        set pen-size 1.5
+        set color [color] of myself
+        pen-up
+      ]
+    ]
+  ]
+  
+  ask connections [ set hidden? true ]
+  reset-ticks
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; GO
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to go
+  ;; Reset visitor counts for this tick to measure current "Flow"
+  ask sites [ set visitors-count 0 ]
+
+  ask travellers [
+    ifelse not is-traveling? [
+      ;; Move based on probability
+      if (random-float 100 < movement-probability) [
+        let origin current-site
+        let potential-targets other sites
+        
+        if any? potential-targets [
+          ;; GRAVITY CHOICE: Probability ~ (Wi^alpha * Wj^beta * e^-lambda*d)
+          ;; distance converted to metres for consistent scaling across CSV and map modes
+              let choice rnd:weighted-one-of potential-targets [
+              (([importance] of origin ^ alpha-exponent) *
+              (importance ^ beta-exponent) *
+             (exp (- distance-decay-lambda * (distance origin * meters-per-patch))))
+          ]
+           
+         if choice != current-site [
+            set last-importance-seen [importance] of current-site
+            set target-site choice
+            set is-traveling? true
+            face target-site
+            pen-down
+          ]
+        ]
+      ]
+    ] [
+      ;; traveller in transit
+      fd 1
+      if distance target-site < 1 [
+        move-to target-site
+        set current-site target-site
+        pen-up
+        
+        ;; --- GRAHAM & STEINER (2006) AGENT LOGIC ---
+        ;; 1. Register the visit (The "Flow" in the RW equation)
+        ask current-site [ set visitors-count visitors-count + 1 ]
+        let destination current-site
+        let source-home my-home
+        if source-home != destination [
+        ask source-home [
+          if not out-connection-neighbor? destination [
+              
+            create-connection-to destination [ set travel-count 0 set hidden? true]
+            
+          ]
+          ask out-connection-to destination [
+            set travel-count travel-count + 1
+          ]
+        ]
+        ]
+        ;; 2. Reflected Glory / Color Diffusion logic
+        ifelse [importance] of current-site > last-importance-seen [
+          ;; If destination is more important, traveller adopts its influence
+          set color [color] of current-site
+        ] [
+          ;; If traveller comes from more "glory," destination adopts traveller's color
+          ask current-site [ set color [color] of myself ]
+        ]
+        
+        set last-importance-seen [importance] of current-site
+        set is-traveling? false
+        set target-site nobody
+        
+      ]
+    ]
+  ]
+
+  update-site-variables
+  ask connections [ set hidden? true ] ; just to catch any; we want to keep track of the connections, but we only want to see traveller traces.
+  tick
+end
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; RIHLL-WILSON SITE UPDATE
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to update-site-variables
+  ;; Rihll-Wilson equation:
+  ;;   Wⱼ(t+1) = Wⱼ(t) + ε · [ Σᵢ Tᵢⱼ  −  κ · Wⱼ(t) ]
+  ;;
+  ;; ε = gamma / 100   (feedback speed)
+  ;; κ = social-weight  (maintenance cost)
+  ;; Wj(t+1) = Wj(t) + epsilon * [ Flow - (kappa * Wj(t)) ]
+  let epsilon (gamma / 100)
+  let kappa social-weight
+
+  ;; We need a scaling constant because 1 agent visit might be "worth" 
+  ;; more than 1 unit of importance.
+  let flow-sensitivity 10 
+  let max-imp max [importance] of sites   
+  
+  ask sites [
+    ;; growth = feedback * (Incoming-Flow - Maintenance-Cost)
+    let growth epsilon * ((visitors-count * flow-sensitivity) - (kappa * importance))
+    set importance importance + growth
+
+    ;; Floors to prevent total extinction of small sites
+    if importance < 1 [ set importance 1 ]
+    ;; DYNAMIC RESIZING
+  ;; Calculate the max importance currently in the world to scale visuals
+    set size 1 + 6 * (importance / max-imp)   ;; ← scales between 1 and 6
+    
+    ;; Visuals: size encodes Importance; color intensity shifts with importance
+    
+    ;; Decay link visual travel counts
+    ask my-out-connections [ set travel-count travel-count * 0.95 ]
+  ]
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; LINK VISUALS (optional call from Interface button)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+; to update-link-visuals
+;   ask connections [
+;     ifelse travel-count > 0.1 [
+;       set thickness max (list 0.3 (travel-count / 10))
+;       set color [color] of end1
+;       set hidden? false
+;     ] [
+;       set hidden? true
+;     ]
+;   ]
+; end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; EXPORT
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to export-network
+  let filename (word "network-export-" ticks ".csv")
+  if file-exists? filename [ file-delete filename ]
+  file-open filename
+
+  file-print "source,target,weight,source_attr,target_attr"
+
+  ;ask connections with [travel-count > 0.01] [
+  ask connections [
+    let s    [site-id]       of end1
+    let t    [site-id]       of end2
+    let w    travel-count
+    let s_at [importance] of end1
+    let t_at [importance] of end2
+    file-print (word s "," t "," w "," s_at "," t_at)
+  ]
+
+  file-close
+  user-message (word "Network exported: "
+    count connections with [travel-count > 0.01] " links saved.")
+end
+
+
+to-report average-importance
+  report mean [importance] of sites
+end
+
+;;;;; load old original travellersim maps
+;; Declare globals and breeds at the very top of your program
+
+
+to setup-map
+  file-close-all
+  set maps "tibervalley3.png"
+  let map-found? true
+  
+  ;; IMPORTANT: In Map mode, we must define what a patch represents 
+  ;; so the movement logic doesn't break.
+  ;set meters-per-patch 100 ;; Match this to your CSV scale
+  
+  carefully [
+    import-pcolors maps
+  ] [
+    set map-found? false
+    user-message (word "The selected map--\"" maps "\"--was not found.")
+  ]
+  
+  if not map-found? [ stop ]
+
+  ;; Calculate scale based on red patches
+  ;; 1. Identify the scale bar patches
+  let red-patches patches with [ shade-of? pcolor 133.4 ]
+  let num-red-patches count red-patches
+
+  ;; 2. Calculate meters-per-patch dynamically
+  ;; If the red bar = 20km, then 1 patch = 20,000 / number of patches
+  ifelse num-red-patches > 0 [
+    set meters-per-patch (20000 / num-red-patches)
+    
+    ;; Optional: the 'scale' variable you were using
+    ;; If you want scale to be 'meters per 1/2 patch', keep your math:
+    set scale 0.5 * num-red-patches 
+  ] [
+    ;; Fallback if no red patches are found to avoid division by zero
+    user-message "Warning: No red scale bar found. Defaulting to 100m per patch."
+    set meters-per-patch 100
+  ]
+  
+  print (word "Map Loaded. Each patch is " precision meters-per-patch 2 " meters wide.")
+end   
+
+to setup-settlements
+  clear-turtles
+  clear-links
+  
+  set-default-shape sites "house"
+  set area-min-val 0
+  set area-max-val 1000 
+
+  ;; Reset the tracking variable
+  ask patches [ set load-checked? false ]
+
+  ;; Loop through patches in the VIOLET range (112-120)
+  ask patches with [ violet-ish? pcolor and not load-checked? ] [
+    
+    ;; 1. Find all contiguous violet-ish patches starting from this one
+    let clump find-clump self
+    
+    ;; 2. Mark the whole clump immediately so we don't sprout here again
+    ask clump [ set load-checked? true ]
+    
+    ;; 3. Find the visual center of the clump
+    let avg-px mean [pxcor] of clump
+    let avg-py mean [pycor] of clump
+    let center-patch min-one-of clump [ distancexy avg-px avg-py ]
+    
+    ask center-patch [
+      sprout-sites 1 [
+        set site-id who
+        
+        ;; Calculate area/importance based on the number of pixels in the blotch
+        set initial-area (count clump * 50) 
+        set scaled-area 100 * (initial-area - area-min-val) / ((area-max-val - area-min-val) + 0.1)
+        set importance 500 ;; or could set importance scaled-area
+        
+        set shape "house"
+        let assigned-hue (5 + (who * 17) mod 130)
+        set base-color assigned-hue
+        set color base-color
+
+        ;; 4. Hatch travellers
+        let initial-pop max (list 1 (round (initial-area / 200)))
+        hatch-travellers initial-pop [
+        set shape "person"
+        ;set color yellow
+        set size  1.5
+        set current-site myself
+        set my-home myself
+        set is-traveling? false
+        set last-importance-seen [importance] of myself
+        set pen-size 1.5
+        set color [color] of myself
+        pen-up
+        ]
+      ]
+    ]
+    
+    ;; 5. Change the pixels to white so the house is clearly visible
+    ask clump [ set pcolor white ]
+  ]
+  ask connections [ set hidden? true ]
+  reset-ticks
+end
+
+;; --- Helper Reporters ---
+
+;; This defines your site color range (112 to 120)
+to-report violet-ish? [ c ]
+  report (c >= 112 and c <= 120)
+end
+
+;; This gathers all connected patches of that color range
+to-report find-clump [ start-patch ]
+  let clump (patch-set start-patch)
+  let frontier (patch-set start-patch)
+  
+  while [ any? frontier ] [
+    ;; FIXED: Use (patch-set [neighbors] of frontier) to flatten the list of agentsets
+    ;; This ensures all contiguous pixels are caught in one pass.
+    let candidates (patch-set [neighbors] of frontier) with [ 
+      violet-ish? pcolor and not member? self clump 
+    ]
+    
+    set clump (patch-set clump candidates)
+    set frontier candidates
+  ]
+  report clump
+end
+
+to cleanup-duplicate-sites
+  ;; We ask all sites to check if they have a neighbor that is also a site
+  ask sites [
+    ;; Look for any other site within 1.5 patches (includes diagonals)
+    let nearby-sites other sites in-radius 1.5
+    
+    if any? nearby-sites [
+      ;; TIE-BREAKER: If two sites are neighbors, only one should die.
+      ;; We say: "If my ID (who) is higher than my neighbor's ID, I will die."
+      ;; This ensures we don't accidentally kill BOTH neighboring sites.
+      if any? nearby-sites with [ who < [who] of myself ] [
+        
+        ;; 1. Kill the travellers belonging to this site so they don't wander 
+        ;; aimlessly to the edge of the map.
+        let my-homeless-travellers travellers with [ my-home = myself ]
+        ask my-homeless-travellers [ die ]
+        
+        ;; 2. Kill the site itself
+        die
+      ]
+    ]
+  ]
+end
+
+;;;;;reporters for runs ;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; REPORTERS — Hierarchy & Importance Distribution
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; Gini coefficient of site importance (0 = perfectly equal, 1 = fully concentrated)
+;; Classic inequality measure; tracks how polarised the hierarchy has become
+to-report gini-importance
+  let vals sort [importance] of sites
+  let n length vals
+  if n = 0 [ report 0 ]
+  let indexed-sum 0
+  let idx 1
+  foreach vals [ v ->
+    set indexed-sum indexed-sum + (idx * v)
+    set idx idx + 1
+  ]
+  let total-sum sum vals
+  if total-sum = 0 [ report 0 ]
+  report (2 * indexed-sum) / (n * total-sum) - (n + 1) / n
+end
+
+;; Importance of the single most dominant site
+to-report max-importance
+  report max [importance] of sites
+end
+
+;; Mean importance across all sites
+to-report mean-importance
+  report mean [importance] of sites
+end
+
+;; Standard deviation of importance — low value signals the system has stabilised
+to-report sd-importance
+  report standard-deviation [importance] of sites
+end
+
+;; Ratio of the top site's importance to the mean — a "primacy index"
+;; Values >> 1 indicate a primate centre has emerged
+to-report primacy-index
+  let m mean-importance
+  if m = 0 [ report 0 ]
+  report max-importance / m
+end
+
+;; Number of sites more than 2× the mean importance — the "elite tier" count
+to-report dominant-site-count
+  let threshold mean-importance * 2
+  report count sites with [importance > threshold]
+end
+
+;; site-id of the current most important site (useful for tracking which site wins)
+to-report leading-site-id
+  report [site-id] of max-one-of sites [importance]
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; REPORTERS — Flow & Visitor Activity
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; Total visitor-events recorded across all sites this tick
+to-report total-flow-this-tick
+  report sum [visitors-count] of sites
+end
+
+;; Proportion of travellers currently in transit (0–1)
+;; High values = active landscape; low = stagnant movement
+to-report proportion-traveling
+  let total count travellers
+  if total = 0 [ report 0 ]
+  report count travellers with [is-traveling?] / total
+end
+
+;; Which site is receiving the most visitors RIGHT NOW
+to-report busiest-site-id
+  report [site-id] of max-one-of sites [visitors-count]
+end
+
+;; Flow to the top site as a share of all flow — concentration of traffic
+to-report flow-concentration
+  let total total-flow-this-tick
+  if total = 0 [ report 0 ]
+  report max [visitors-count] of sites / total
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; REPORTERS — Network Structure
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; Count of active links (travel-count above noise floor)
+to-report active-link-count
+  report count connections with [travel-count > 0.1]
+end
+
+;; Network density: active links as a proportion of all possible directed links
+;; n*(n-1) is the maximum possible directed edges for n sites
+to-report network-density
+  let n count sites
+  if n < 2 [ report 0 ]
+  report active-link-count / (n * (n - 1))
+end
+
+;; Mean travel-count across active links — overall flow intensity in the network
+to-report mean-link-weight
+  let active connections with [travel-count > 0.1]
+  if not any? active [ report 0 ]
+  report mean [travel-count] of active
+end
+
+;; In-degree of the most connected site (how many unique origins send traffic to it)
+to-report max-in-degree
+  report max [count my-in-connections with [travel-count > 0.1]] of sites
+end
+
+;; The site-id of the highest in-degree site (the network hub)
+to-report hub-site-id
+  report [site-id] of max-one-of sites [
+    count my-in-connections with [travel-count > 0.1]
+  ]
+end
+
+;; Number of sites that receive NO active inbound traffic — isolated nodes
+to-report isolated-site-count
+  report count sites with [
+    not any? my-in-connections with [travel-count > 0.1]
+  ]
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; REPORTERS — Stability / Convergence
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; Coefficient of variation of importance (sd / mean) — scale-free instability measure
+;; Useful as a BehaviorSpace stop condition: stop when this drops below a threshold
+to-report importance-cv
+  let m mean-importance
+  if m = 0 [ report 0 ]
+  report sd-importance / m
+end
+
+;; Rank-order correlation between current importance and initial scaled-area
+;; Spearman's rho approximation: 1 = model reproduces input hierarchy, 
+;; -1 = model has completely inverted it, 0 = no relationship
+to-report rank-correlation-importance-vs-area
+  let imp-ranks rank-list [importance] of sites
+  let area-ranks rank-list [scaled-area] of sites
+  let n length imp-ranks
+  if n < 2 [ report 0 ]
+  let d-sq-sum sum (map [ [r1 r2] -> (r1 - r2) ^ 2 ] imp-ranks area-ranks)
+  report 1 - (6 * d-sq-sum) / (n * (n ^ 2 - 1))
+end
+
+;; Helper: returns a list of rank positions for a given list of values
+;; Ties receive the average rank
+to-report rank-list [vals]
+  let sorted-vals sort vals
+  ;; We map over the original list and call our helper for each value
+  report map [ v -> get-average-rank v sorted-vals ] vals
+end
+
+;; Helper: calculates the average rank of a value in a sorted list
+to-report get-average-rank [v sorted-list]
+  let rank-sum 0
+  let rank-count 0
+  let idx 1
+  
+  foreach sorted-list [ sv ->
+    if sv = v [
+      set rank-sum rank-sum + idx
+      set rank-count rank-count + 1
+    ]
+    set idx idx + 1
+  ]
+  
+  ;; Return the average rank
+  report rank-sum / rank-count
+end
+
+;;add this in behaviour space to stop if no meaningful changes happening:
+;; In BehaviorSpace "Stop condition" field:
+;;importance-cv < 0.05]]></code>
+  <widgets>
+    <view x="368" wrappingAllowedX="false" y="10" frameRate="30.0" minPycor="0" height="563" showTickCounter="true" patchSize="2.6923076923076925" fontSize="10" wrappingAllowedY="false" width="706" tickCounterLabel="ticks" maxPycor="207" updateMode="0" maxPxcor="260" minPxcor="0"></view>
+    <monitor x="1100" precision="17" y="25" height="60" fontSize="11" width="100">gini-importance</monitor>
+    <monitor x="1100" precision="17" y="90" height="60" fontSize="11" width="100">primacy-index</monitor>
+    <monitor x="1105" precision="17" y="160" height="60" fontSize="11" width="100">dominant-site-count</monitor>
+    <monitor x="1110" precision="17" y="230" height="60" fontSize="11" width="100">network-density</monitor>
+    <monitor x="1105" precision="17" y="300" height="60" fontSize="11" width="100">importance-cv</monitor>
+    <monitor x="1105" precision="17" y="370" height="60" fontSize="11" width="100">rank-correlation-importance-vs-area</monitor>
+    <plot x="365" autoPlotX="true" yMax="10.0" autoPlotY="true" y="590" xMin="0.0" height="175" legend="false" xMax="10.0" yMin="0.0" width="230" display="gini">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="default" color="-16777216" legend="true">
+        <setup></setup>
+        <update>plot gini-importance</update>
+      </pen>
+    </plot>
+    <plot x="610" autoPlotX="true" yMax="10.0" autoPlotY="true" y="585" xMin="0.0" height="175" legend="false" xMax="10.0" yMin="0.0" width="230" display="max v mean importance">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="default" color="-16777216" legend="true">
+        <setup></setup>
+        <update>plot max-importance</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="pen-1" color="-7500403" legend="true">
+        <setup></setup>
+        <update>plot mean-importance</update>
+      </pen>
+    </plot>
+    <plot x="850" autoPlotX="true" yMax="10.0" autoPlotY="true" y="585" xMin="0.0" height="175" legend="false" xMax="10.0" yMin="0.0" width="230" display="sd">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="default" color="-16777216" legend="true">
+        <setup></setup>
+        <update>plot sd-importance</update>
+      </pen>
+    </plot>
+    <plot x="1095" autoPlotX="true" yMax="10.0" autoPlotY="true" y="585" xMin="0.0" height="175" legend="false" xMax="10.0" yMin="0.0" width="230" display="link count">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="default" color="-16777216" legend="true">
+        <setup></setup>
+        <update>plot active-link-count</update>
+      </pen>
+    </plot>
+    <button x="190" y="635" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="75" display="step once">go</button>
+    <button x="50" y="625" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="120" display="import old TS map">ca
+setup-map
+setup-settlements
+cleanup-duplicate-sites
+reset-ticks</button>
+    <button x="60" y="700" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="105">export-network</button>
+    <slider x="55" step="0.5" y="195" max="3.0" width="250" display="beta-exponent" height="50" min="0.0" direction="Horizontal" default="2.0" variable="beta-exponent"></slider>
+    <slider x="55" step="1.0" y="135" max="3.0" width="250" display="alpha-exponent" height="50" min="0.0" direction="Horizontal" default="2.0" variable="alpha-exponent"></slider>
+    <slider x="55" step="0.0001" y="250" max="0.005" width="250" display="distance-decay-lambda" height="50" min="0.0001" direction="Horizontal" default="7.0E-4" variable="distance-decay-lambda"></slider>
+    <slider x="50" step="0.01" y="380" max="1" width="250" display="social-weight" height="50" min="0.0" direction="Horizontal" default="0.86" variable="social-weight"></slider>
+    <slider x="55" step="0.1" y="305" max="3" width="250" display="gamma" height="50" min="0" direction="Horizontal" default="2.3" variable="gamma"></slider>
+    <slider x="50" step="1" y="445" max="100" width="250" display="movement-probability" height="50" min="0" direction="Horizontal" default="88.0" variable="movement-probability"></slider>
+    <button x="50" y="580" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="115">setup</button>
+    <button x="190" y="585" height="40" disableUntilTicks="false" forever="true" kind="Observer" width="55">go</button>
+    <button x="210" y="705" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="95">clear-drawing
+</button>
+  </widgets>
+  <info><![CDATA[# TravellerSim Redux NetLogo Model — Logic & Flow Documentation
+
+A re-implementation of Graham & Steiner's (2006) *TravellerSim* agent-based model of site-system emergence in pre-modern landscapes, combining a **gravity model of movement** with the **Rihll-Wilson (1987) dynamic importance equation**.
+
+---
+
+## 1. Theoretical Foundations
+
+The model sits at the intersection of two complementary frameworks:
+
+**Rihll & Wilson (1987) — Spatial Interaction / "Retail" Model**
+Originally developed to model the emergence of central places in ancient Greece. The core insight is that site importance (*W*) is not a fixed property but an emergent outcome of interaction flows. Sites that attract more visitors grow in importance; importance in turn attracts more visitors — a positive feedback loop. The model predicts the spontaneous polarisation of a settlement landscape into a hierarchy of dominant centres and tributary hinterlands.
+
+**Graham & Steiner (2006) — Agent-Based Re-implementation**
+Rather than solving the Rihll-Wilson equations analytically, Graham and Steiner re-cast the same dynamics as an agent-based model populated by mobile *settlers* who make probabilistic movement decisions. This approach makes the underlying micro-level assumptions explicit and observable, and it naturally generates network data (who travels to where) as a by-product.
+
+The present code follows this agent-based strategy faithfully, using NetLogo's `rnd:weighted-one-of` primitive to implement the gravity weighting and applying the Rihll-Wilson update rule at each tick.
+
+---
+
+## 2. Entities, State Variables, and Scales
+
+### 2.1 Sites (`breed [sites site]`)
+
+Sites represent archaeological settlements or potential central places. Each site carries:
+
+<table class="table table-striped table-bordered">
+<thead>
+<tr>
+<th>Variable</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>site-id</code></td>
+<td>Unique identifier loaded from CSV</td>
+</tr>
+<tr>
+<td><code>initial-area</code></td>
+<td>Physical area from survey data (raw)</td>
+</tr>
+<tr>
+<td><code>scaled-area</code></td>
+<td>Area normalised 0–100; used to initialise <code>importance</code></td>
+</tr>
+<tr>
+<td><code>importance</code></td>
+<td><strong>Wⱼ</strong> — the core dynamic variable; encodes site significance</td>
+</tr>
+<tr>
+<td><code>visitors-count</code></td>
+<td>Incoming settler visits this tick; the empirical <em>flow</em> Tᵢⱼ</td>
+</tr>
+<tr>
+<td><code>base-color</code></td>
+<td>Aesthetic baseline; overwritten by colour-diffusion logic</td>
+</tr>
+</tbody>
+</table>
+
+### 2.2 Settlers (`breed [settlers settler]`)
+
+Settlers are the mobile agents that generate interaction flows. Each carries:
+a
+
+
+
+<table class="table table-striped table-bordered">
+<thead>
+<tr>
+<th>Variable</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>current-site</code></td>
+<td>The site the settler is currently at or departing from</td>
+</tr>
+<tr>
+<td><code>target-site</code></td>
+<td>The site the settler is currently travelling toward</td>
+</tr>
+<tr>
+<td><code>is-traveling?</code></td>
+<td>Boolean state: resident vs. in transit</td>
+</tr>
+<tr>
+<td><code>last-importance-seen</code></td>
+<td>Importance of the <em>origin</em> site, used for colour-diffusion logic</td>
+</tr>
+<tr>
+<td><code>my-home</code></td>
+<td>The settler’s home site; used to record directed network edges</td>
+</tr>
+</tbody>
+</table>
+
+
+
+### 2.3 Connections (`directed-link-breed [connections connection]`)
+
+Links between sites are created lazily — only when a settler actually makes a journey. Each carries a `travel-count` that accumulates visits and decays over time, yielding a weighted directed network.
+
+### 2.4 Spatial Scale
+
+The world is sized dynamically from the bounding box of the site coordinates in the CSV. One patch = `meters-per-patch` (default 100 m) of real-world space. The visible window is set to 700 pixels wide.
+
+---
+
+## 3. Initialisation (`setup`)
+
+```
+setup
+ ├── Clear world; paint patches white
+ ├── Load "sites-short-data.csv"
+ │    ├── Extract easting, northing, area columns
+ │    └── Compute global min/max area for normalisation
+ ├── Resize world to fit coordinate bounding box
+ └── For each row in CSV:
+      ├── Create one site turtle at correct projected coordinates
+      ├── Assign site-id, initial-area, scaled-area
+      ├── Set importance ← scaled-area   (Wⱼ initialised from physical evidence)
+      └── Hatch settlers proportional to initial-area / 200
+           └── Each settler starts at parent site, is-traveling? = false
+```
+
+A key design decision: importance is seeded from empirically-measured site area rather than set uniformly. This gives the dynamics a realistic starting point while still allowing the model to diverge from the archaeological record under its own logic.
+
+---
+
+## 4. The `go` Procedure — Tick Logic
+
+Each tick executes three broad phases:
+
+### Phase 1 — Reset Flow Counters
+
+```netlogo
+ask sites [ set visitors-count 0 ]
+```
+
+Visitor counts are *per-tick* measurements of flow. Resetting them each tick means `visitors-count` always reflects current conditions, not accumulated history.
+
+---
+
+### Phase 2 — Settler Behaviour
+
+Every settler is either **resident** (at a site) or **in transit** (moving across the world).
+
+#### 2a. Resident settlers — movement decision
+
+```
+if random-float 100 < movement-probability
+  → compute gravity weights for all other sites
+  → rnd:weighted-one-of selects target
+  → set is-traveling? true; face target-site
+```
+
+The **gravity weight** for a candidate destination *j*, given origin *i*, is:
+
+```
+weight(i→j) = Wᵢᵅ  ×  Wⱼᵝ  ×  exp(−λ · dᵢⱼ)
+```
+
+where:
+- **α** (`alpha-exponent`) — sensitivity to origin site importance; high α means settlers from powerful sites are more likely to travel
+- **β** (`beta-exponent`) — sensitivity to destination importance; high β means attractive sites draw disproportionately more visitors
+- **λ** (`distance-decay-lambda`) — rate at which distance discourages travel; higher values create more locally-clustered movement
+- **dᵢⱼ** — Euclidean patch distance between origin and destination
+
+This is a classic *singly-constrained spatial interaction model* encoded at the agent level. The `rnd:weighted-one-of` reporter samples probabilistically from this distribution, so dominant sites attract more travellers but small sites are never completely cut off.
+
+
+Distance-decay
+
+exp(- lambda * (distance-in-patches * meters-per-patch))
+
+thus, with hoja data loaded from csv: CSV mode: 10 patches × 100 m/patch = 1000m
+with Tiber valley data loaded from map.png mode: 10 patches × 600 m/patch = 6000m
+
+thus
+
+;;   distance-decay-lambda [0.0001 – 0.1, default 0.0005]  λ in exp(−λ·d) decay
+;;                          d is in metres; λ means "decay per metre"
+;;                          interaction range ≈ 2.3 / λ metres
+;;                          0.0001 ≈ 23km  (regional network)
+;;                          0.0005 ≈ 4.6km (default; ~half-day walk catchment)
+;;                          0.001  ≈ 2.3km (tight local clustering)
+
+#### 2b. Travelling settlers — movement and arrival
+
+```
+fd 1   ;; step toward target-site
+
+if distance target-site < 1:
+  → move-to target-site
+  → ask current-site: visitors-count + 1       ;; register the visit
+  → record/update directed connection edge     ;; network bookkeeping
+  → colour-diffusion logic                     ;; cultural signal propagation
+  → is-traveling? ← false
+```
+
+The **colour-diffusion** rule encodes an informal model of cultural influence:
+
+- If the **destination** is more important than the settler's last remembered origin, the settler adopts the destination's colour (absorbs the centre's prestige).
+- If the settler comes **from** a more important place, the destination adopts the settler's colour (peripheral sites receive the imprint of more powerful ones).
+
+This creates an emergent visual signature of cultural catchment areas that mirrors the network structure.
+
+---
+
+### Phase 3 — Rihll-Wilson Site Update (`update-site-variables`)
+
+After all settlers have moved, sites update their importance using the discretised Rihll-Wilson equation:
+
+```
+Wⱼ(t+1) = Wⱼ(t) + ε · [ (visitors-count × flow-sensitivity) − (κ · Wⱼ(t)) ]
+```
+
+<table class="table table-striped table-bordered">
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Variable</th>
+<th>Interpretation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ε</td>
+<td><code>gamma / 100</code></td>
+<td>Speed of feedback; how quickly importance responds to flow</td>
+</tr>
+<tr>
+<td>κ</td>
+<td><code>social-weight</code></td>
+<td>Maintenance cost; how much importance decays without visitors</td>
+</tr>
+<tr>
+<td>flow-sensitivity</td>
+<td>hardcoded 10</td>
+<td>Scales discrete agent visits into continuous importance units</td>
+</tr>
+</tbody>
+</table>
+
+The equation has two competing forces:
+
+1. **Growth term** — `visitors-count × flow-sensitivity` rewards sites that attract traffic.
+2. **Decay term** — `κ × Wⱼ` penalises sites for simply existing; importance must be earned each tick.
+
+A floor of `importance ≥ 1` prevents complete extinction of any site, preserving the ability for peripherally-positioned settlements to recover if conditions change.
+
+Finally, link `travel-count` values decay by a factor of 0.95 per tick, so the network edge weights reflect *recent* rather than *cumulative* traffic.
+
+---
+
+## 5. Secondary Procedures
+
+### `update-link-visuals`
+Called manually from the Interface. Sets link thickness proportional to `travel-count`, making high-traffic corridors visually prominent.
+
+### `export-network`
+Writes a timestamped CSV of all directed edges with columns `source, target, weight, source_attr, target_attr`. This allows the emergent network to be analysed in external tools (Gephi, NetworkX, R igraph) at any snapshot in model time.
+
+### `setup-map` / `setup-settlements`
+Legacy procedures for loading raster background maps (PNG files from the original TravellerSim distribution). Sites are placed wherever violet pixels appear in the imported map image. This path bypasses the CSV loader and uses default importance values, allowing qualitative visual exploration on georeferenced landscapes without quantitative site data.
+
+---
+
+## 6. Model Flow Summary
+
+```
+SETUP
+│
+├─ Load CSV → place sites at real coordinates
+├─ Seed importance from physical area
+└─ Hatch settler populations
+
+TICK LOOP ──────────────────────────────────────────────────────────────────
+│
+├─ [1] Reset all visitors-count → 0
+│
+├─ [2] For each settler:
+│    │
+│    ├─ RESIDENT: roll movement-probability
+│    │    └─ YES → compute gravity weights → stochastic destination choice
+│    │              → set is-traveling? = true
+│    │
+│    └─ TRAVELLING: step forward 1 patch
+│         └─ ARRIVED? → register visit at destination
+│                      → update directed edge weight
+│                      → colour-diffusion rule
+│                      → set is-traveling? = false
+│
+├─ [3] Update site importance (Rihll-Wilson equation)
+│    ├─ growth  = ε × (flow − κ·W)
+│    ├─ floor   at importance = 1
+│    └─ decay   link travel-counts × 0.95
+│
+└─ tick
+```
+
+---
+
+## 7. Known Limitations and Design Choices
+
+**Flow sensitivity is hardcoded.** The constant `flow-sensitivity = 10` is a bridging scalar that converts discrete agent visits into continuous Rihll-Wilson units. Its value is not theoretically motivated and should be treated as an implicit parameter during analysis.
+
+**Settlers do not return home.** Once a settler arrives at a destination it becomes a permanent resident of that site. This is a simplification; the original model intention may have been for settlers to return, which would keep population at origin sites stable and alter the flow dynamics considerably.
+
+**Colour diffusion is visual, not functional.** The colour-spreading rule does not feed back into importance calculations. It is a useful qualitative diagnostic but should not be interpreted as a quantitative cultural transmission model.
+
+**Distance is Euclidean patch distance.** No terrain friction, river networks, or road costs are incorporated. Adding a cost-surface would be a natural extension, particularly for the raster-map loading path.
+
+---
+
+## 8. BehaviorSpace Parameter Sweep — Exploration Plan
+
+NetLogo's **BehaviorSpace** tool (Tools → BehaviorSpace) allows systematic, automated multi-run experiments across parameter combinations. The following plan is designed to explore the three principal axes of model behaviour: *hierarchy formation*, *network topology*, and *sensitivity to initial conditions*.
+
+---
+
+### 8.1 Parameters and Proposed Ranges
+
+| Parameter | Sweep Range | Step | Rationale |
+|---|---|---|---|
+| `alpha-exponent` | 0.0 – 2.0 | 0.5 | Controls whether origin power amplifies travel |
+| `beta-exponent` | 0.0 – 2.0 | 0.5 | Controls preferential attachment to dominant sites |
+| `distance-decay-lambda` | 0.01 – 0.15 | 0.02 | Controls the spatial reach of interaction |
+| `gamma` | 5 – 30 | 5 | Feedback speed; low = sluggish hierarchy; high = rapid polarisation |
+| `social-weight` | 0.1 – 1.0 | 0.3 | Maintenance cost; high values prune weak sites aggressively |
+| `movement-probability` | 5 – 30 | 5 | Agent activity level; affects how quickly equilibrium is reached |
+
+A **full factorial** sweep across all six parameters at these increments produces an extremely large experiment (~50,000+ runs). The recommended approach is therefore a two-stage design:
+
+---
+
+### 8.2 Stage 1 — Latin Hypercube Screening (broad sensitivity)
+
+Run ~500 parameter combinations sampled quasi-randomly across the full space (NetLogo does not natively support LHS, but combinations can be generated externally as a CSV and fed in via `behaviorspace-experiment-name`). The goal is to identify which parameters have the largest effect on outcome metrics, and which can be held constant in Stage 2.
+
+**BehaviorSpace configuration for Stage 1:**
+```
+Experiment name:    lhs-screening
+Repetitions:        3  (per combination, for stochastic variance)
+Run combinations:   Sequential (load from external list)
+Stop condition:     ticks >= 500
+Metrics to collect:
+  - ticks
+  - max [importance] of sites
+  - mean [importance] of sites
+  - standard-deviation [importance] of sites
+  - count sites with [importance > (mean [importance] of sites * 2)]
+  - count connections with [travel-count > 0.1]
+```
+
+The `count sites with [importance > 2× mean]` metric operationalises *hierarchy depth* — the number of sites that have pulled significantly ahead of the average.
+
+---
+
+### 8.3 Stage 2 — Focused Grid Sweep (mechanism isolation)
+
+Based on Stage 1 results, fix insensitive parameters and sweep the most influential 2–3 parameters in a full factorial grid with higher repetitions per cell.
+
+**Hypothesised key parameters** (to be confirmed by Stage 1):
+
+- **`beta-exponent` × `distance-decay-lambda`** — the tension between preferential attachment and spatial constraint is the core mechanism driving hierarchy vs. dispersal. High β + low λ should produce a single dominant primate centre; low β + high λ should produce a more even regional lattice.
+- **`gamma` × `social-weight`** — controls how quickly the system reaches equilibrium and whether small sites can survive. This axis speaks to the temporal stability of the hierarchy.
+
+**Suggested grid for Stage 2:**
+```
+beta-exponent:          [0.5, 1.0, 1.5, 2.0]
+distance-decay-lambda:  [0.01, 0.03, 0.05, 0.10, 0.15]
+gamma:                  [5, 15, 30]
+social-weight:          [0.2, 0.5, 0.8]
+Repetitions:            10 per cell
+Stop condition:         ticks >= 1000
+```
+
+This gives 4 × 5 × 3 × 3 × 10 = 1,800 runs — tractable on a multi-core machine using NetLogo's parallel execution.
+
+---
+
+### 8.4 Outcome Metrics
+
+Collect the following reporters at the end of each run. These should be defined as `to-report` procedures in the model code:
+
+<table class="table table-striped table-bordered">
+<thead>
+<tr>
+<th>Metric</th>
+<th>Reporter</th>
+<th>Interpretation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Maximum importance</td>
+<td><code>max [importance] of sites</code></td>
+<td>Identifies the primate centre strength</td>
+</tr>
+<tr>
+<td>Importance Gini coefficient</td>
+<td>custom reporter</td>
+<td>Degree of inequality across the site hierarchy</td>
+</tr>
+<tr>
+<td>Number of dominant sites</td>
+<td><code>count sites with [importance &gt; 2 * mean [importance] of sites]</code></td>
+<td>Hierarchy depth</td>
+</tr>
+<tr>
+<td>Network density</td>
+<td><code>count connections with [travel-count &gt; 0.1] / (count sites * (count sites - 1))</code></td>
+<td>Connectedness of the interaction network</td>
+</tr>
+<tr>
+<td>Mean edge weight</td>
+<td><code>mean [travel-count] of connections</code></td>
+<td>Average flow intensity</td>
+</tr>
+<tr>
+<td>Ticks to stability</td>
+<td>detect when <code>standard-deviation [importance] of sites</code> plateaus</td>
+<td>Speed of hierarchy formation</td>
+</tr>
+</tbody>
+</table>
+
+---
+
+### 8.5 Analysis Pipeline
+
+1. **Export BehaviorSpace results** as a CSV (NetLogo default).
+2. **Clean and pivot** in Python (pandas) or R — one row per run, parameters as columns, metrics as columns.
+3. **Sensitivity analysis** — use a Sobol index or simple ANOVA / random forest feature importance to rank parameters by their contribution to outcome variance.
+4. **Phase-space plots** — heatmaps of `max-importance` and `hierarchy-depth` on β × λ axes, faceted by γ. These will reveal the boundary between dispersed and polarised regimes.
+5. **Network analysis** — export the final network from representative runs in each phase-space region using `export-network`, then compute degree distribution, modularity, and betweenness centrality externally to characterise the topology of the emergent interaction graph.
+6. **Comparison with archaeological record** — cross-reference site importance rankings produced by the model against known site hierarchies from the study region, using rank-order correlation (Spearman's ρ) as a fit statistic.
+
+---
+
+### 8.6 Practical Notes for Running BehaviorSpace
+
+- Set **parallel runs** to match your CPU core count minus one (Tools → Preferences in NetLogo).
+- Use the **"Table output"** format rather than spreadsheet for large experiments; it is faster to write and easier to parse programmatically.
+- Define a **`stop` condition** based on importance variance stabilisation rather than a fixed tick count where possible — this avoids wasting compute on runs that have already reached equilibrium.
+- The `export-network` procedure writes files to disk during runs; disable it in BehaviorSpace experiments unless you specifically need network snapshots, as it will generate thousands of files and significantly slow execution.
+- Consider running Stage 1 overnight on a cluster or cloud VM; 500 × 3 × 500-tick runs can take several hours on a single machine depending on settler population sizes.
+
+;;add this in behaviour space to stop if no meaningful changes happening:
+;; In BehaviorSpace "Stop condition" field:
+;;importance-cv < 0.05
+]]></info>
+  <turtleShapes>
+    <shape name="default" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="5"></point>
+        <point x="40" y="250"></point>
+        <point x="150" y="205"></point>
+        <point x="260" y="250"></point>
+      </polygon>
+    </shape>
+    <shape name="airplane" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="0"></point>
+        <point x="135" y="15"></point>
+        <point x="120" y="60"></point>
+        <point x="120" y="105"></point>
+        <point x="15" y="165"></point>
+        <point x="15" y="195"></point>
+        <point x="120" y="180"></point>
+        <point x="135" y="240"></point>
+        <point x="105" y="270"></point>
+        <point x="120" y="285"></point>
+        <point x="150" y="270"></point>
+        <point x="180" y="285"></point>
+        <point x="210" y="270"></point>
+        <point x="165" y="240"></point>
+        <point x="180" y="180"></point>
+        <point x="285" y="195"></point>
+        <point x="285" y="165"></point>
+        <point x="180" y="105"></point>
+        <point x="180" y="60"></point>
+        <point x="165" y="15"></point>
+      </polygon>
+    </shape>
+    <shape name="arrow" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="0"></point>
+        <point x="0" y="150"></point>
+        <point x="105" y="150"></point>
+        <point x="105" y="293"></point>
+        <point x="195" y="293"></point>
+        <point x="195" y="150"></point>
+        <point x="300" y="150"></point>
+      </polygon>
+    </shape>
+    <shape name="box" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="285"></point>
+        <point x="285" y="225"></point>
+        <point x="285" y="75"></point>
+        <point x="150" y="135"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="135"></point>
+        <point x="15" y="75"></point>
+        <point x="150" y="15"></point>
+        <point x="285" y="75"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="15" y="75"></point>
+        <point x="15" y="225"></point>
+        <point x="150" y="285"></point>
+        <point x="150" y="135"></point>
+      </polygon>
+      <line endX="150" startY="285" marked="false" color="255" endY="135" startX="150"></line>
+      <line endX="15" startY="135" marked="false" color="255" endY="75" startX="150"></line>
+      <line endX="285" startY="135" marked="false" color="255" endY="75" startX="150"></line>
+    </shape>
+    <shape name="bug" rotatable="true" editableColorIndex="0">
+      <circle x="96" y="182" marked="true" color="-1920102913" diameter="108" filled="true"></circle>
+      <circle x="110" y="127" marked="true" color="-1920102913" diameter="80" filled="true"></circle>
+      <circle x="110" y="75" marked="true" color="-1920102913" diameter="80" filled="true"></circle>
+      <line endX="80" startY="100" marked="true" color="-1920102913" endY="30" startX="150"></line>
+      <line endX="220" startY="100" marked="true" color="-1920102913" endY="30" startX="150"></line>
+    </shape>
+    <shape name="butterfly" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="165"></point>
+        <point x="209" y="199"></point>
+        <point x="225" y="225"></point>
+        <point x="225" y="255"></point>
+        <point x="195" y="270"></point>
+        <point x="165" y="255"></point>
+        <point x="150" y="240"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="165"></point>
+        <point x="89" y="198"></point>
+        <point x="75" y="225"></point>
+        <point x="75" y="255"></point>
+        <point x="105" y="270"></point>
+        <point x="135" y="255"></point>
+        <point x="150" y="240"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="139" y="148"></point>
+        <point x="100" y="105"></point>
+        <point x="55" y="90"></point>
+        <point x="25" y="90"></point>
+        <point x="10" y="105"></point>
+        <point x="10" y="135"></point>
+        <point x="25" y="180"></point>
+        <point x="40" y="195"></point>
+        <point x="85" y="194"></point>
+        <point x="139" y="163"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="162" y="150"></point>
+        <point x="200" y="105"></point>
+        <point x="245" y="90"></point>
+        <point x="275" y="90"></point>
+        <point x="290" y="105"></point>
+        <point x="290" y="135"></point>
+        <point x="275" y="180"></point>
+        <point x="260" y="195"></point>
+        <point x="215" y="195"></point>
+        <point x="162" y="165"></point>
+      </polygon>
+      <polygon color="255" filled="true" marked="false">
+        <point x="150" y="255"></point>
+        <point x="135" y="225"></point>
+        <point x="120" y="150"></point>
+        <point x="135" y="120"></point>
+        <point x="150" y="105"></point>
+        <point x="165" y="120"></point>
+        <point x="180" y="150"></point>
+        <point x="165" y="225"></point>
+      </polygon>
+      <circle x="135" y="90" marked="false" color="255" diameter="30" filled="true"></circle>
+      <line endX="195" startY="105" marked="false" color="255" endY="60" startX="150"></line>
+      <line endX="105" startY="105" marked="false" color="255" endY="60" startX="150"></line>
+    </shape>
+    <shape name="car" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="300" y="180"></point>
+        <point x="279" y="164"></point>
+        <point x="261" y="144"></point>
+        <point x="240" y="135"></point>
+        <point x="226" y="132"></point>
+        <point x="213" y="106"></point>
+        <point x="203" y="84"></point>
+        <point x="185" y="63"></point>
+        <point x="159" y="50"></point>
+        <point x="135" y="50"></point>
+        <point x="75" y="60"></point>
+        <point x="0" y="150"></point>
+        <point x="0" y="165"></point>
+        <point x="0" y="225"></point>
+        <point x="300" y="225"></point>
+        <point x="300" y="180"></point>
+      </polygon>
+      <circle x="180" y="180" marked="false" color="255" diameter="90" filled="true"></circle>
+      <circle x="30" y="180" marked="false" color="255" diameter="90" filled="true"></circle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="162" y="80"></point>
+        <point x="132" y="78"></point>
+        <point x="134" y="135"></point>
+        <point x="209" y="135"></point>
+        <point x="194" y="105"></point>
+        <point x="189" y="96"></point>
+        <point x="180" y="89"></point>
+      </polygon>
+      <circle x="47" y="195" marked="true" color="-1920102913" diameter="58" filled="true"></circle>
+      <circle x="195" y="195" marked="true" color="-1920102913" diameter="58" filled="true"></circle>
+    </shape>
+    <shape name="circle" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+    </shape>
+    <shape name="circle 2" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+      <circle x="30" y="30" marked="false" color="255" diameter="240" filled="true"></circle>
+    </shape>
+    <shape name="cow" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="200" y="193"></point>
+        <point x="197" y="249"></point>
+        <point x="179" y="249"></point>
+        <point x="177" y="196"></point>
+        <point x="166" y="187"></point>
+        <point x="140" y="189"></point>
+        <point x="93" y="191"></point>
+        <point x="78" y="179"></point>
+        <point x="72" y="211"></point>
+        <point x="49" y="209"></point>
+        <point x="48" y="181"></point>
+        <point x="37" y="149"></point>
+        <point x="25" y="120"></point>
+        <point x="25" y="89"></point>
+        <point x="45" y="72"></point>
+        <point x="103" y="84"></point>
+        <point x="179" y="75"></point>
+        <point x="198" y="76"></point>
+        <point x="252" y="64"></point>
+        <point x="272" y="81"></point>
+        <point x="293" y="103"></point>
+        <point x="285" y="121"></point>
+        <point x="255" y="121"></point>
+        <point x="242" y="118"></point>
+        <point x="224" y="167"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="73" y="210"></point>
+        <point x="86" y="251"></point>
+        <point x="62" y="249"></point>
+        <point x="48" y="208"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="25" y="114"></point>
+        <point x="16" y="195"></point>
+        <point x="9" y="204"></point>
+        <point x="23" y="213"></point>
+        <point x="25" y="200"></point>
+        <point x="39" y="123"></point>
+      </polygon>
+    </shape>
+    <shape name="cylinder" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+    </shape>
+    <shape name="dot" rotatable="false" editableColorIndex="0">
+      <circle x="90" y="90" marked="true" color="-1920102913" diameter="120" filled="true"></circle>
+    </shape>
+    <shape name="face happy" rotatable="false" editableColorIndex="0">
+      <circle x="8" y="8" marked="true" color="-1920102913" diameter="285" filled="true"></circle>
+      <circle x="60" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="150" y="255"></point>
+        <point x="90" y="239"></point>
+        <point x="62" y="213"></point>
+        <point x="47" y="191"></point>
+        <point x="67" y="179"></point>
+        <point x="90" y="203"></point>
+        <point x="109" y="218"></point>
+        <point x="150" y="225"></point>
+        <point x="192" y="218"></point>
+        <point x="210" y="203"></point>
+        <point x="227" y="181"></point>
+        <point x="251" y="194"></point>
+        <point x="236" y="217"></point>
+        <point x="212" y="240"></point>
+      </polygon>
+    </shape>
+    <shape name="face neutral" rotatable="false" editableColorIndex="0">
+      <circle x="8" y="7" marked="true" color="-1920102913" diameter="285" filled="true"></circle>
+      <circle x="60" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <rectangle endX="240" startY="195" marked="false" color="255" endY="225" startX="60" filled="true"></rectangle>
+    </shape>
+    <shape name="face sad" rotatable="false" editableColorIndex="0">
+      <circle x="8" y="8" marked="true" color="-1920102913" diameter="285" filled="true"></circle>
+      <circle x="60" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="150" y="168"></point>
+        <point x="90" y="184"></point>
+        <point x="62" y="210"></point>
+        <point x="47" y="232"></point>
+        <point x="67" y="244"></point>
+        <point x="90" y="220"></point>
+        <point x="109" y="205"></point>
+        <point x="150" y="198"></point>
+        <point x="192" y="205"></point>
+        <point x="210" y="220"></point>
+        <point x="227" y="242"></point>
+        <point x="251" y="229"></point>
+        <point x="236" y="206"></point>
+        <point x="212" y="183"></point>
+      </polygon>
+    </shape>
+    <shape name="fish" rotatable="false" editableColorIndex="0">
+      <polygon color="-1" filled="true" marked="false">
+        <point x="44" y="131"></point>
+        <point x="21" y="87"></point>
+        <point x="15" y="86"></point>
+        <point x="0" y="120"></point>
+        <point x="15" y="150"></point>
+        <point x="0" y="180"></point>
+        <point x="13" y="214"></point>
+        <point x="20" y="212"></point>
+        <point x="45" y="166"></point>
+      </polygon>
+      <polygon color="-1" filled="true" marked="false">
+        <point x="135" y="195"></point>
+        <point x="119" y="235"></point>
+        <point x="95" y="218"></point>
+        <point x="76" y="210"></point>
+        <point x="46" y="204"></point>
+        <point x="60" y="165"></point>
+      </polygon>
+      <polygon color="-1" filled="true" marked="false">
+        <point x="75" y="45"></point>
+        <point x="83" y="77"></point>
+        <point x="71" y="103"></point>
+        <point x="86" y="114"></point>
+        <point x="166" y="78"></point>
+        <point x="135" y="60"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="30" y="136"></point>
+        <point x="151" y="77"></point>
+        <point x="226" y="81"></point>
+        <point x="280" y="119"></point>
+        <point x="292" y="146"></point>
+        <point x="292" y="160"></point>
+        <point x="287" y="170"></point>
+        <point x="270" y="195"></point>
+        <point x="195" y="210"></point>
+        <point x="151" y="212"></point>
+        <point x="30" y="166"></point>
+      </polygon>
+      <circle x="215" y="106" marked="false" color="255" diameter="30" filled="true"></circle>
+    </shape>
+    <shape name="flag" rotatable="false" editableColorIndex="0">
+      <rectangle endX="75" startY="15" marked="true" color="-1920102913" endY="300" startX="60" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="90" y="150"></point>
+        <point x="270" y="90"></point>
+        <point x="90" y="30"></point>
+      </polygon>
+      <line endX="90" startY="135" marked="true" color="-1920102913" endY="135" startX="75"></line>
+      <line endX="90" startY="45" marked="true" color="-1920102913" endY="45" startX="75"></line>
+    </shape>
+    <shape name="flower" rotatable="false" editableColorIndex="0">
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="135" y="120"></point>
+        <point x="165" y="165"></point>
+        <point x="180" y="210"></point>
+        <point x="180" y="240"></point>
+        <point x="150" y="300"></point>
+        <point x="165" y="300"></point>
+        <point x="195" y="240"></point>
+        <point x="195" y="195"></point>
+        <point x="165" y="135"></point>
+      </polygon>
+      <circle x="85" y="132" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="130" y="147" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="192" y="85" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="85" y="40" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="177" y="40" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="177" y="132" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="70" y="85" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="130" y="25" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="96" y="51" marked="true" color="-1920102913" diameter="108" filled="true"></circle>
+      <circle x="113" y="68" marked="false" color="255" diameter="74" filled="true"></circle>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="189" y="233"></point>
+        <point x="219" y="188"></point>
+        <point x="249" y="173"></point>
+        <point x="279" y="188"></point>
+        <point x="234" y="218"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="180" y="255"></point>
+        <point x="150" y="210"></point>
+        <point x="105" y="210"></point>
+        <point x="75" y="240"></point>
+        <point x="135" y="240"></point>
+      </polygon>
+    </shape>
+    <shape name="house" rotatable="false" editableColorIndex="0">
+      <rectangle endX="255" startY="120" marked="true" color="-1920102913" endY="285" startX="45" filled="true"></rectangle>
+      <rectangle endX="180" startY="210" marked="false" color="255" endY="285" startX="120" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="15" y="120"></point>
+        <point x="150" y="15"></point>
+        <point x="285" y="120"></point>
+      </polygon>
+      <line endX="270" startY="120" marked="false" color="255" endY="120" startX="30"></line>
+    </shape>
+    <shape name="leaf" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="210"></point>
+        <point x="135" y="195"></point>
+        <point x="120" y="210"></point>
+        <point x="60" y="210"></point>
+        <point x="30" y="195"></point>
+        <point x="60" y="180"></point>
+        <point x="60" y="165"></point>
+        <point x="15" y="135"></point>
+        <point x="30" y="120"></point>
+        <point x="15" y="105"></point>
+        <point x="40" y="104"></point>
+        <point x="45" y="90"></point>
+        <point x="60" y="90"></point>
+        <point x="90" y="105"></point>
+        <point x="105" y="120"></point>
+        <point x="120" y="120"></point>
+        <point x="105" y="60"></point>
+        <point x="120" y="60"></point>
+        <point x="135" y="30"></point>
+        <point x="150" y="15"></point>
+        <point x="165" y="30"></point>
+        <point x="180" y="60"></point>
+        <point x="195" y="60"></point>
+        <point x="180" y="120"></point>
+        <point x="195" y="120"></point>
+        <point x="210" y="105"></point>
+        <point x="240" y="90"></point>
+        <point x="255" y="90"></point>
+        <point x="263" y="104"></point>
+        <point x="285" y="105"></point>
+        <point x="270" y="120"></point>
+        <point x="285" y="135"></point>
+        <point x="240" y="165"></point>
+        <point x="240" y="180"></point>
+        <point x="270" y="195"></point>
+        <point x="240" y="210"></point>
+        <point x="180" y="210"></point>
+        <point x="165" y="195"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="195"></point>
+        <point x="135" y="240"></point>
+        <point x="120" y="255"></point>
+        <point x="105" y="255"></point>
+        <point x="105" y="285"></point>
+        <point x="135" y="285"></point>
+        <point x="165" y="240"></point>
+        <point x="165" y="195"></point>
+      </polygon>
+    </shape>
+    <shape name="line" rotatable="true" editableColorIndex="0">
+      <line endX="150" startY="0" marked="true" color="-1920102913" endY="300" startX="150"></line>
+    </shape>
+    <shape name="line half" rotatable="true" editableColorIndex="0">
+      <line endX="150" startY="0" marked="true" color="-1920102913" endY="150" startX="150"></line>
+    </shape>
+    <shape name="pentagon" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="15"></point>
+        <point x="15" y="120"></point>
+        <point x="60" y="285"></point>
+        <point x="240" y="285"></point>
+        <point x="285" y="120"></point>
+      </polygon>
+    </shape>
+    <shape name="person" rotatable="false" editableColorIndex="0">
+      <circle x="110" y="5" marked="true" color="-1920102913" diameter="80" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="105" y="90"></point>
+        <point x="120" y="195"></point>
+        <point x="90" y="285"></point>
+        <point x="105" y="300"></point>
+        <point x="135" y="300"></point>
+        <point x="150" y="225"></point>
+        <point x="165" y="300"></point>
+        <point x="195" y="300"></point>
+        <point x="210" y="285"></point>
+        <point x="180" y="195"></point>
+        <point x="195" y="90"></point>
+      </polygon>
+      <rectangle endX="172" startY="79" marked="true" color="-1920102913" endY="94" startX="127" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="195" y="90"></point>
+        <point x="240" y="150"></point>
+        <point x="225" y="180"></point>
+        <point x="165" y="105"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="105" y="90"></point>
+        <point x="60" y="150"></point>
+        <point x="75" y="180"></point>
+        <point x="135" y="105"></point>
+      </polygon>
+    </shape>
+    <shape name="plant" rotatable="false" editableColorIndex="0">
+      <rectangle endX="165" startY="90" marked="true" color="-1920102913" endY="300" startX="135" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="255"></point>
+        <point x="90" y="210"></point>
+        <point x="45" y="195"></point>
+        <point x="75" y="255"></point>
+        <point x="135" y="285"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="165" y="255"></point>
+        <point x="210" y="210"></point>
+        <point x="255" y="195"></point>
+        <point x="225" y="255"></point>
+        <point x="165" y="285"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="180"></point>
+        <point x="90" y="135"></point>
+        <point x="45" y="120"></point>
+        <point x="75" y="180"></point>
+        <point x="135" y="210"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="165" y="180"></point>
+        <point x="165" y="210"></point>
+        <point x="225" y="180"></point>
+        <point x="255" y="120"></point>
+        <point x="210" y="135"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="105"></point>
+        <point x="90" y="60"></point>
+        <point x="45" y="45"></point>
+        <point x="75" y="105"></point>
+        <point x="135" y="135"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="165" y="105"></point>
+        <point x="165" y="135"></point>
+        <point x="225" y="105"></point>
+        <point x="255" y="45"></point>
+        <point x="210" y="60"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="90"></point>
+        <point x="120" y="45"></point>
+        <point x="150" y="15"></point>
+        <point x="180" y="45"></point>
+        <point x="165" y="90"></point>
+      </polygon>
+    </shape>
+    <shape name="sheep" rotatable="false" editableColorIndex="15">
+      <circle x="203" y="65" marked="true" color="-1" diameter="88" filled="true"></circle>
+      <circle x="70" y="65" marked="true" color="-1" diameter="162" filled="true"></circle>
+      <circle x="150" y="105" marked="true" color="-1" diameter="120" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="false">
+        <point x="218" y="120"></point>
+        <point x="240" y="165"></point>
+        <point x="255" y="165"></point>
+        <point x="278" y="120"></point>
+      </polygon>
+      <circle x="214" y="72" marked="false" color="-1920102913" diameter="67" filled="true"></circle>
+      <rectangle endX="179" startY="223" marked="true" color="-1" endY="298" startX="164" filled="true"></rectangle>
+      <polygon color="-1" filled="true" marked="true">
+        <point x="45" y="285"></point>
+        <point x="30" y="285"></point>
+        <point x="30" y="240"></point>
+        <point x="15" y="195"></point>
+        <point x="45" y="210"></point>
+      </polygon>
+      <circle x="3" y="83" marked="true" color="-1" diameter="150" filled="true"></circle>
+      <rectangle endX="80" startY="221" marked="true" color="-1" endY="296" startX="65" filled="true"></rectangle>
+      <polygon color="-1" filled="true" marked="true">
+        <point x="195" y="285"></point>
+        <point x="210" y="285"></point>
+        <point x="210" y="240"></point>
+        <point x="240" y="210"></point>
+        <point x="195" y="210"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="false">
+        <point x="276" y="85"></point>
+        <point x="285" y="105"></point>
+        <point x="302" y="99"></point>
+        <point x="294" y="83"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="false">
+        <point x="219" y="85"></point>
+        <point x="210" y="105"></point>
+        <point x="193" y="99"></point>
+        <point x="201" y="83"></point>
+      </polygon>
+    </shape>
+    <shape name="square" rotatable="false" editableColorIndex="0">
+      <rectangle endX="270" startY="30" marked="true" color="-1920102913" endY="270" startX="30" filled="true"></rectangle>
+    </shape>
+    <shape name="square 2" rotatable="false" editableColorIndex="0">
+      <rectangle endX="270" startY="30" marked="true" color="-1920102913" endY="270" startX="30" filled="true"></rectangle>
+      <rectangle endX="240" startY="60" marked="false" color="255" endY="240" startX="60" filled="true"></rectangle>
+    </shape>
+    <shape name="star" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="151" y="1"></point>
+        <point x="185" y="108"></point>
+        <point x="298" y="108"></point>
+        <point x="207" y="175"></point>
+        <point x="242" y="282"></point>
+        <point x="151" y="216"></point>
+        <point x="59" y="282"></point>
+        <point x="94" y="175"></point>
+        <point x="3" y="108"></point>
+        <point x="116" y="108"></point>
+      </polygon>
+    </shape>
+    <shape name="target" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+      <circle x="30" y="30" marked="false" color="255" diameter="240" filled="true"></circle>
+      <circle x="60" y="60" marked="true" color="-1920102913" diameter="180" filled="true"></circle>
+      <circle x="90" y="90" marked="false" color="255" diameter="120" filled="true"></circle>
+      <circle x="120" y="120" marked="true" color="-1920102913" diameter="60" filled="true"></circle>
+    </shape>
+    <shape name="tree" rotatable="false" editableColorIndex="0">
+      <circle x="118" y="3" marked="true" color="-1920102913" diameter="94" filled="true"></circle>
+      <rectangle endX="180" startY="195" marked="false" color="-1653716737" endY="300" startX="120" filled="true"></rectangle>
+      <circle x="65" y="21" marked="true" color="-1920102913" diameter="108" filled="true"></circle>
+      <circle x="116" y="41" marked="true" color="-1920102913" diameter="127" filled="true"></circle>
+      <circle x="45" y="90" marked="true" color="-1920102913" diameter="120" filled="true"></circle>
+      <circle x="104" y="74" marked="true" color="-1920102913" diameter="152" filled="true"></circle>
+    </shape>
+    <shape name="triangle" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="30"></point>
+        <point x="15" y="255"></point>
+        <point x="285" y="255"></point>
+      </polygon>
+    </shape>
+    <shape name="triangle 2" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="30"></point>
+        <point x="15" y="255"></point>
+        <point x="285" y="255"></point>
+      </polygon>
+      <polygon color="255" filled="true" marked="false">
+        <point x="151" y="99"></point>
+        <point x="225" y="223"></point>
+        <point x="75" y="224"></point>
+      </polygon>
+    </shape>
+    <shape name="truck" rotatable="false" editableColorIndex="0">
+      <rectangle endX="195" startY="45" marked="true" color="-1920102913" endY="187" startX="4" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="296" y="193"></point>
+        <point x="296" y="150"></point>
+        <point x="259" y="134"></point>
+        <point x="244" y="104"></point>
+        <point x="208" y="104"></point>
+        <point x="207" y="194"></point>
+      </polygon>
+      <rectangle endX="195" startY="60" marked="false" color="-1" endY="105" startX="195" filled="true"></rectangle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="238" y="112"></point>
+        <point x="252" y="141"></point>
+        <point x="219" y="141"></point>
+        <point x="218" y="112"></point>
+      </polygon>
+      <circle x="234" y="174" marked="false" color="255" diameter="42" filled="true"></circle>
+      <rectangle endX="214" startY="185" marked="true" color="-1920102913" endY="194" startX="181" filled="true"></rectangle>
+      <circle x="144" y="174" marked="false" color="255" diameter="42" filled="true"></circle>
+      <circle x="24" y="174" marked="false" color="255" diameter="42" filled="true"></circle>
+      <circle x="24" y="174" marked="true" color="-1920102913" diameter="42" filled="false"></circle>
+      <circle x="144" y="174" marked="true" color="-1920102913" diameter="42" filled="false"></circle>
+      <circle x="234" y="174" marked="true" color="-1920102913" diameter="42" filled="false"></circle>
+    </shape>
+    <shape name="turtle" rotatable="true" editableColorIndex="0">
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="215" y="204"></point>
+        <point x="240" y="233"></point>
+        <point x="246" y="254"></point>
+        <point x="228" y="266"></point>
+        <point x="215" y="252"></point>
+        <point x="193" y="210"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="195" y="90"></point>
+        <point x="225" y="75"></point>
+        <point x="245" y="75"></point>
+        <point x="260" y="89"></point>
+        <point x="269" y="108"></point>
+        <point x="261" y="124"></point>
+        <point x="240" y="105"></point>
+        <point x="225" y="105"></point>
+        <point x="210" y="105"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="105" y="90"></point>
+        <point x="75" y="75"></point>
+        <point x="55" y="75"></point>
+        <point x="40" y="89"></point>
+        <point x="31" y="108"></point>
+        <point x="39" y="124"></point>
+        <point x="60" y="105"></point>
+        <point x="75" y="105"></point>
+        <point x="90" y="105"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="132" y="85"></point>
+        <point x="134" y="64"></point>
+        <point x="107" y="51"></point>
+        <point x="108" y="17"></point>
+        <point x="150" y="2"></point>
+        <point x="192" y="18"></point>
+        <point x="192" y="52"></point>
+        <point x="169" y="65"></point>
+        <point x="172" y="87"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="85" y="204"></point>
+        <point x="60" y="233"></point>
+        <point x="54" y="254"></point>
+        <point x="72" y="266"></point>
+        <point x="85" y="252"></point>
+        <point x="107" y="210"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="119" y="75"></point>
+        <point x="179" y="75"></point>
+        <point x="209" y="101"></point>
+        <point x="224" y="135"></point>
+        <point x="220" y="225"></point>
+        <point x="175" y="261"></point>
+        <point x="128" y="261"></point>
+        <point x="81" y="224"></point>
+        <point x="74" y="135"></point>
+        <point x="88" y="99"></point>
+      </polygon>
+    </shape>
+    <shape name="wheel" rotatable="false" editableColorIndex="0">
+      <circle x="3" y="3" marked="true" color="-1920102913" diameter="294" filled="true"></circle>
+      <circle x="30" y="30" marked="false" color="255" diameter="240" filled="true"></circle>
+      <line endX="150" startY="285" marked="true" color="-1920102913" endY="15" startX="150"></line>
+      <line endX="285" startY="150" marked="true" color="-1920102913" endY="150" startX="15"></line>
+      <circle x="120" y="120" marked="true" color="-1920102913" diameter="60" filled="true"></circle>
+      <line endX="79" startY="40" marked="true" color="-1920102913" endY="269" startX="216"></line>
+      <line endX="269" startY="84" marked="true" color="-1920102913" endY="221" startX="40"></line>
+      <line endX="269" startY="216" marked="true" color="-1920102913" endY="79" startX="40"></line>
+      <line endX="221" startY="40" marked="true" color="-1920102913" endY="269" startX="84"></line>
+    </shape>
+    <shape name="wolf" rotatable="false" editableColorIndex="0">
+      <polygon color="255" filled="true" marked="false">
+        <point x="253" y="133"></point>
+        <point x="245" y="131"></point>
+        <point x="245" y="133"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="2" y="194"></point>
+        <point x="13" y="197"></point>
+        <point x="30" y="191"></point>
+        <point x="38" y="193"></point>
+        <point x="38" y="205"></point>
+        <point x="20" y="226"></point>
+        <point x="20" y="257"></point>
+        <point x="27" y="265"></point>
+        <point x="38" y="266"></point>
+        <point x="40" y="260"></point>
+        <point x="31" y="253"></point>
+        <point x="31" y="230"></point>
+        <point x="60" y="206"></point>
+        <point x="68" y="198"></point>
+        <point x="75" y="209"></point>
+        <point x="66" y="228"></point>
+        <point x="65" y="243"></point>
+        <point x="82" y="261"></point>
+        <point x="84" y="268"></point>
+        <point x="100" y="267"></point>
+        <point x="103" y="261"></point>
+        <point x="77" y="239"></point>
+        <point x="79" y="231"></point>
+        <point x="100" y="207"></point>
+        <point x="98" y="196"></point>
+        <point x="119" y="201"></point>
+        <point x="143" y="202"></point>
+        <point x="160" y="195"></point>
+        <point x="166" y="210"></point>
+        <point x="172" y="213"></point>
+        <point x="173" y="238"></point>
+        <point x="167" y="251"></point>
+        <point x="160" y="248"></point>
+        <point x="154" y="265"></point>
+        <point x="169" y="264"></point>
+        <point x="178" y="247"></point>
+        <point x="186" y="240"></point>
+        <point x="198" y="260"></point>
+        <point x="200" y="271"></point>
+        <point x="217" y="271"></point>
+        <point x="219" y="262"></point>
+        <point x="207" y="258"></point>
+        <point x="195" y="230"></point>
+        <point x="192" y="198"></point>
+        <point x="210" y="184"></point>
+        <point x="227" y="164"></point>
+        <point x="242" y="144"></point>
+        <point x="259" y="145"></point>
+        <point x="284" y="151"></point>
+        <point x="277" y="141"></point>
+        <point x="293" y="140"></point>
+        <point x="299" y="134"></point>
+        <point x="297" y="127"></point>
+        <point x="273" y="119"></point>
+        <point x="270" y="105"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="-1" y="195"></point>
+        <point x="14" y="180"></point>
+        <point x="36" y="166"></point>
+        <point x="40" y="153"></point>
+        <point x="53" y="140"></point>
+        <point x="82" y="131"></point>
+        <point x="134" y="133"></point>
+        <point x="159" y="126"></point>
+        <point x="188" y="115"></point>
+        <point x="227" y="108"></point>
+        <point x="236" y="102"></point>
+        <point x="238" y="98"></point>
+        <point x="268" y="86"></point>
+        <point x="269" y="92"></point>
+        <point x="281" y="87"></point>
+        <point x="269" y="103"></point>
+        <point x="269" y="113"></point>
+      </polygon>
+    </shape>
+    <shape name="x" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="270" y="75"></point>
+        <point x="225" y="30"></point>
+        <point x="30" y="225"></point>
+        <point x="75" y="270"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="30" y="75"></point>
+        <point x="75" y="30"></point>
+        <point x="270" y="225"></point>
+        <point x="225" y="270"></point>
+      </polygon>
+    </shape>
+  </turtleShapes>
+  <linkShapes>
+    <shape name="default" curviness="0.0">
+      <lines>
+        <line x="-0.2" visible="false">
+          <dash value="0.0"></dash>
+          <dash value="1.0"></dash>
+        </line>
+        <line x="0.0" visible="true">
+          <dash value="1.0"></dash>
+          <dash value="0.0"></dash>
+        </line>
+        <line x="0.2" visible="false">
+          <dash value="0.0"></dash>
+          <dash value="1.0"></dash>
+        </line>
+      </lines>
+      <indicator>
+        <shape name="link direction" rotatable="true" editableColorIndex="0">
+          <line endX="90" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line>
+          <line endX="210" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line>
+        </shape>
+      </indicator>
+    </shape>
+  </linkShapes>
+  <previewCommands>setup repeat 75 [ go ]</previewCommands>
+</model>
