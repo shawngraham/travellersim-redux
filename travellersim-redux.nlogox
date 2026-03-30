@@ -14,7 +14,10 @@ globals [
   area-min-val
   ;;for old travellersim maps
   maps  ;; This should hold the filename/path string
-  scale 
+  scale
+  last-color-count
+  stability-ticks
+  initial-color-count
 
 ]
 
@@ -82,6 +85,8 @@ to setup
   foreach raw-data [ row ->
     create-sites 1 [
       set site-id      (item 0 row)
+      set label        site-id
+      set label-color  black  
       set initial-area (item 3 row)
       set scaled-area  100 * (initial-area - area-min-val) / ((area-max-val - area-min-val) + 0.1)
 
@@ -112,6 +117,9 @@ to setup
   ]
   
   ask connections [ set hidden? true ]
+  set initial-color-count count-unique-site-colors
+  set last-color-count 0
+  set stability-ticks 0
   reset-ticks
 end
 
@@ -191,9 +199,12 @@ to go
   ]
 
   update-site-variables
+  update-color-stability
   ask connections [ set hidden? true ] ; just to catch any; we want to keep track of the connections, but we only want to see traveller traces.
-  tick
+  if is-color-converged-and-stable? 500 [stop]
+  tick  
 end
+
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -380,6 +391,10 @@ to setup-settlements
     ask clump [ set pcolor white ]
   ]
   ask connections [ set hidden? true ]
+  set initial-color-count count-unique-site-colors
+  set last-color-count 0
+  set stability-ticks 0
+  
   reset-ticks
 end
 
@@ -613,7 +628,61 @@ end
 
 ;;add this in behaviour space to stop if no meaningful changes happening:
 ;; In BehaviorSpace "Stop condition" field:
-;;importance-cv < 0.05]]></code>
+;;importance-cv < 0.05
+
+to update-color-stability
+  let current-count count-unique-site-colors
+  ifelse current-count = last-color-count [
+    set stability-ticks stability-ticks + 1
+  ] [
+    set last-color-count current-count
+    set stability-ticks 0
+  ]
+end
+
+;; Pure reporter — just reads the state:
+
+to-report is-color-converged-and-stable? [ required-ticks ]
+  ;; Must have seen a real drop AND then been stable for required-ticks
+  report (count-unique-site-colors < initial-color-count * 0.6) 
+      and (stability-ticks >= required-ticks)
+end
+
+
+;; Returns the number of unique sites colors currently in existence
+to-report count-unique-site-colors
+  report length remove-duplicates [color] of sites
+end
+
+;; Returns the percentage of the population belonging to the most common color
+;; (The height of the tallest bar in your histogram)
+to-report color-dominance-index
+  let total count sites
+  if total = 0 [ report 0 ]
+  let color-counts map [ c -> count sites with [color = c] ] (remove-duplicates [color] of sites)
+  report (max color-counts / total) * 100
+end
+
+;; Shannon Entropy of colors: measures how "mixed" the colors are.
+;; High value = many colors evenly spread. Low (0) = everyone is the same color.
+to-report color-entropy
+  let total count sites
+  if total = 0 [ report 0 ]
+  let distinct-colors remove-duplicates [color] of sites
+  let entropy 0
+  foreach distinct-colors [ c ->
+    let p (count sites with [color = c] / total)
+    set entropy entropy + (p * ln p)
+  ]
+  report -1 * entropy
+end
+
+;; Returns the actual counts as a list (e.g., [[color1 count] [color2 count]])
+;; WARNING: Only use this if you are using "Table" output in BehaviorSpace
+to-report raw-color-distribution
+  let distinct-colors sort remove-duplicates [color] of sites
+  report map [ c -> list c (count travellers with [color = c]) ] distinct-colors
+end]]></code>
   <widgets>
     <view x="368" wrappingAllowedX="false" y="10" frameRate="30.0" minPycor="0" height="563" showTickCounter="true" patchSize="2.6923076923076925" fontSize="10" wrappingAllowedY="false" width="706" tickCounterLabel="ticks" maxPycor="207" updateMode="0" maxPxcor="260" minPxcor="0"></view>
     <monitor x="1100" precision="17" y="25" height="60" fontSize="11" width="100">gini-importance</monitor>
@@ -621,7 +690,6 @@ end
     <monitor x="1105" precision="17" y="160" height="60" fontSize="11" width="100">dominant-site-count</monitor>
     <monitor x="1110" precision="17" y="230" height="60" fontSize="11" width="100">network-density</monitor>
     <monitor x="1105" precision="17" y="300" height="60" fontSize="11" width="100">importance-cv</monitor>
-    <monitor x="1105" precision="17" y="370" height="60" fontSize="11" width="100">rank-correlation-importance-vs-area</monitor>
     <plot x="365" autoPlotX="true" yMax="10.0" autoPlotY="true" y="590" xMin="0.0" height="175" legend="false" xMax="10.0" yMin="0.0" width="230" display="gini">
       <setup></setup>
       <update></update>
@@ -665,16 +733,29 @@ setup-settlements
 cleanup-duplicate-sites
 reset-ticks</button>
     <button x="60" y="700" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="105">export-network</button>
-    <slider x="55" step="0.5" y="195" max="3.0" width="250" display="beta-exponent" height="50" min="0.0" direction="Horizontal" default="2.0" variable="beta-exponent"></slider>
-    <slider x="55" step="1.0" y="135" max="3.0" width="250" display="alpha-exponent" height="50" min="0.0" direction="Horizontal" default="2.0" variable="alpha-exponent"></slider>
-    <slider x="55" step="0.0001" y="250" max="0.005" width="250" display="distance-decay-lambda" height="50" min="0.0001" direction="Horizontal" default="7.0E-4" variable="distance-decay-lambda"></slider>
-    <slider x="50" step="0.01" y="380" max="1" width="250" display="social-weight" height="50" min="0.0" direction="Horizontal" default="0.14" variable="social-weight"></slider>
-    <slider x="55" step="0.1" y="305" max="3" width="250" display="gamma" height="50" min="0" direction="Horizontal" default="2.3" variable="gamma"></slider>
-    <slider x="50" step="1" y="445" max="100" width="250" display="movement-probability" height="50" min="0" direction="Horizontal" default="26.0" variable="movement-probability"></slider>
-    <button x="50" y="580" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="115">setup</button>
+    <slider x="55" step="0.5" y="195" max="3.0" width="250" display="beta-exponent" height="50" min="0.0" direction="Horizontal" default="1.5" variable="beta-exponent"></slider>
+    <slider x="55" step="1.0" y="135" max="3.0" width="250" display="alpha-exponent" height="50" min="0.0" direction="Horizontal" default="1.0" variable="alpha-exponent"></slider>
+    <slider x="55" step="0.0001" y="250" max="0.005" width="250" display="distance-decay-lambda" height="50" min="0.0001" direction="Horizontal" default="0.0012" variable="distance-decay-lambda"></slider>
+    <slider x="50" step="0.01" y="380" max="1" width="250" display="social-weight" height="50" min="0.0" direction="Horizontal" default="0.2" variable="social-weight"></slider>
+    <slider x="55" step="0.1" y="305" max="3" width="250" display="gamma" height="50" min="0" direction="Horizontal" default="2.0" variable="gamma"></slider>
+    <slider x="50" step="1" y="445" max="100" width="250" display="movement-probability" height="50" min="0" direction="Horizontal" default="50.0" variable="movement-probability"></slider>
+    <button x="50" y="580" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="115" display="setup hoja">ca
+setup</button>
     <button x="190" y="585" height="40" disableUntilTicks="false" forever="true" kind="Observer" width="55">go</button>
     <button x="210" y="705" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="95">clear-drawing
 </button>
+    <plot x="1095" autoPlotX="false" yMax="20.0" autoPlotY="false" yAxis="# of sites" y="400" xMin="0.0" height="175" legend="false" xMax="140.0" yMin="0.0" width="230" xAxis="color value" display="territories">
+      <setup></setup>
+      <update></update>
+      <pen interval="2.0" mode="1" display="default" color="-16777216" legend="true">
+        <setup>set-plot-x-range 0 140
+set-histogram-num-bars 140 ; one bar per color unit
+set-plot-y-range 0 count sites </setup>
+        <update>histogram [color] of sites</update>
+      </pen>
+    </plot>
+    <monitor x="1260" precision="17" y="225" height="60" fontSize="11" width="100">count-unique-site-colors</monitor>
+    <monitor x="1250" precision="17" y="310" height="60" fontSize="11" width="100">is-color-converged-and-stable? 500</monitor>
   </widgets>
   <info><![CDATA[# TravellerSim Redux NetLogo Model — Logic & Flow Documentation
 
@@ -982,25 +1063,14 @@ TICK LOOP ───────────────────────�
 
 ---
 
-## 7. Known Limitations and Design Choices
 
-**Flow sensitivity is hardcoded.** The constant `flow-sensitivity = 10` is a bridging scalar that converts discrete agent visits into continuous Rihll-Wilson units. Its value is not theoretically motivated and should be treated as an implicit parameter during analysis.
-
-**Settlers do not return home.** Once a settler arrives at a destination it becomes a permanent resident of that site. This is a simplification; the original model intention may have been for settlers to return, which would keep population at origin sites stable and alter the flow dynamics considerably.
-
-**Colour diffusion is visual, not functional.** The colour-spreading rule does not feed back into importance calculations. It is a useful qualitative diagnostic but should not be interpreted as a quantitative cultural transmission model.
-
-**Distance is Euclidean patch distance.** No terrain friction, river networks, or road costs are incorporated. Adding a cost-surface would be a natural extension, particularly for the raster-map loading path.
-
----
-
-## 8. BehaviorSpace Parameter Sweep — Exploration Plan
+## BehaviorSpace Parameter Sweep — Exploration Plan
 
 NetLogo's **BehaviorSpace** tool (Tools → BehaviorSpace) allows systematic, automated multi-run experiments across parameter combinations. The following plan is designed to explore the three principal axes of model behaviour: *hierarchy formation*, *network topology*, and *sensitivity to initial conditions*.
 
 ---
 
-### 8.1 Parameters and Proposed Ranges
+### Parameters and Proposed Ranges
 
 | Parameter | Sweep Range | Step | Rationale |
 |---|---|---|---|
@@ -1015,13 +1085,13 @@ A **full factorial** sweep across all six parameters at these increments produce
 
 ---
 
-### 8.2 Stage 1 — Latin Hypercube Screening (broad sensitivity)
+### Parameter Sweeping
 
-Run ~500 parameter combinations sampled quasi-randomly across the full space (NetLogo does not natively support LHS, but combinations can be generated externally as a CSV and fed in via `behaviorspace-experiment-name`). The goal is to identify which parameters have the largest effect on outcome metrics, and which can be held constant in Stage 2.
+The goal is to identify which parameters have the largest effect on outcome metrics, and which can be held constant in Stage 2.
 
 **BehaviorSpace configuration for Stage 1:**
 ```
-Experiment name:    lhs-screening
+Experiment name:    screening
 Repetitions:        3  (per combination, for stochastic variance)
 Run combinations:   Sequential (load from external list)
 Stop condition:     ticks >= 500
@@ -1966,4 +2036,141 @@ Collect the following reporters at the end of each run. These should be defined 
     </shape>
   </linkShapes>
   <previewCommands>setup repeat 75 [ go ]</previewCommands>
+  <experiments>
+    <experiment name="tiber-stage1" repetitions="3" sequentialRunOrder="true" runMetricsEveryStep="false">
+      <setup>ca
+setup-map
+setup-settlements
+cleanup-duplicate-sites
+reset-ticks</setup>
+      <go>go</go>
+      <exitCondition><![CDATA[ticks >= 3000]]></exitCondition>
+      <metrics>
+        <metric>count-unique-site-colors</metric>
+        <metric>ticks</metric>
+        <metric>max [importance] of sites</metric>
+        <metric>mean [importance] of sites</metric>
+        <metric>standard-deviation [importance] of sites</metric>
+        <metric><![CDATA[count sites with [importance > (mean [importance] of sites * 2)]]]></metric>
+        <metric><![CDATA[count connections with [travel-count > 0.1]]]></metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="alpha-exponent">
+          <value value="0.5"></value>
+          <value value="1"></value>
+          <value value="1.5"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="beta-exponent">
+          <value value="0.5"></value>
+          <value value="1"></value>
+          <value value="1.5"></value>
+          <value value="2"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="distance-decay-lambda">
+          <value value="0.01"></value>
+          <value value="0.05"></value>
+          <value value="0.1"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="social-weight">
+          <value value="0.6"></value>
+          <value value="1"></value>
+          <value value="1.4"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="gamma">
+          <value value="5"></value>
+          <value value="15"></value>
+          <value value="30"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="movement-probability">
+          <value value="50"></value>
+        </enumeratedValueSet>
+      </constants>
+    </experiment>
+    <experiment name="hoja-stage1" repetitions="3" sequentialRunOrder="true" runMetricsEveryStep="false">
+      <setup>ca
+setup</setup>
+      <go>go</go>
+      <exitCondition><![CDATA[ticks >= 3000]]></exitCondition>
+      <metrics>
+        <metric>count-unique-site-colors</metric>
+        <metric>ticks</metric>
+        <metric>max [importance] of sites</metric>
+        <metric>mean [importance] of sites</metric>
+        <metric>standard-deviation [importance] of sites</metric>
+        <metric><![CDATA[count sites with [importance > (mean [importance] of sites * 2)]]]></metric>
+        <metric><![CDATA[count connections with [travel-count > 0.1]]]></metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="alpha-exponent">
+          <value value="0.5"></value>
+          <value value="1"></value>
+          <value value="1.5"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="beta-exponent">
+          <value value="0.5"></value>
+          <value value="1"></value>
+          <value value="1.5"></value>
+          <value value="2"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="distance-decay-lambda">
+          <value value="0.01"></value>
+          <value value="0.05"></value>
+          <value value="0.1"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="social-weight">
+          <value value="0.6"></value>
+          <value value="1"></value>
+          <value value="1.4"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="gamma">
+          <value value="5"></value>
+          <value value="15"></value>
+          <value value="30"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="movement-probability">
+          <value value="50"></value>
+        </enumeratedValueSet>
+      </constants>
+    </experiment>
+    <experiment name="hoja-bare" repetitions="1" sequentialRunOrder="true" runMetricsEveryStep="false">
+      <setup>ca
+setup</setup>
+      <go>go</go>
+      <exitCondition><![CDATA[ticks >= 5000]]></exitCondition>
+      <metrics>
+        <metric>count-unique-site-colors</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="alpha-exponent">
+          <value value="0.5"></value>
+          <value value="1"></value>
+          <value value="1.5"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="beta-exponent">
+          <value value="0.5"></value>
+          <value value="1"></value>
+          <value value="1.5"></value>
+          <value value="2"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="distance-decay-lambda">
+          <value value="0.01"></value>
+          <value value="0.05"></value>
+          <value value="0.1"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="social-weight">
+          <value value="0.6"></value>
+          <value value="1"></value>
+          <value value="1.4"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="gamma">
+          <value value="5"></value>
+          <value value="15"></value>
+          <value value="30"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="movement-probability">
+          <value value="50"></value>
+        </enumeratedValueSet>
+      </constants>
+    </experiment>
+  </experiments>
 </model>
