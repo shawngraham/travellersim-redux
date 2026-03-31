@@ -733,11 +733,11 @@ setup-settlements
 cleanup-duplicate-sites
 reset-ticks</button>
     <button x="60" y="700" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="105">export-network</button>
-    <slider x="55" step="0.5" y="195" max="3.0" width="250" display="beta-exponent" height="50" min="0.0" direction="Horizontal" default="1.5" variable="beta-exponent"></slider>
-    <slider x="55" step="1.0" y="135" max="3.0" width="250" display="alpha-exponent" height="50" min="0.0" direction="Horizontal" default="1.0" variable="alpha-exponent"></slider>
-    <slider x="55" step="0.0001" y="250" max="0.005" width="250" display="distance-decay-lambda" height="50" min="0.0001" direction="Horizontal" default="0.0012" variable="distance-decay-lambda"></slider>
-    <slider x="50" step="0.01" y="380" max="1" width="250" display="social-weight" height="50" min="0.0" direction="Horizontal" default="0.2" variable="social-weight"></slider>
-    <slider x="55" step="0.1" y="305" max="3" width="250" display="gamma" height="50" min="0" direction="Horizontal" default="2.0" variable="gamma"></slider>
+    <slider x="55" step="0.5" y="195" max="3.0" width="250" display="beta-exponent" height="50" min="0.0" direction="Horizontal" default="0.5" variable="beta-exponent"></slider>
+    <slider x="55" step="0.5" y="135" max="3.0" width="250" display="alpha-exponent" height="50" min="0.0" direction="Horizontal" default="0.5" variable="alpha-exponent"></slider>
+    <slider x="55" step="0.0001" y="250" max="0.005" width="250" display="distance-decay-lambda" height="50" min="0.0001" direction="Horizontal" default="9.0E-4" variable="distance-decay-lambda"></slider>
+    <slider x="50" step="0.01" y="380" max="1" width="250" display="social-weight" height="50" min="0.0" direction="Horizontal" default="0.25" variable="social-weight"></slider>
+    <slider x="55" step="0.1" y="305" max="30" width="250" display="gamma" height="50" min="0" direction="Horizontal" default="30.0" variable="gamma"></slider>
     <slider x="50" step="1" y="445" max="100" width="250" display="movement-probability" height="50" min="0" direction="Horizontal" default="50.0" variable="movement-probability"></slider>
     <button x="50" y="580" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="115" display="setup hoja">ca
 setup</button>
@@ -865,6 +865,70 @@ Links between sites are created lazily — only when a settler actually makes a 
 ### 2.4 Spatial Scale
 
 The world is sized dynamically from the bounding box of the site coordinates in the CSV. One patch = `meters-per-patch` (default 100 m) of real-world space. The visible window is set to 700 pixels wide.
+
+---
+
+3. 5 Here is a common-sense explanation of the sliders and how they affect the simulation:
+
+
+### Alpha Exponent (`alpha-exponent`)
+**The "Ambition" of the Origin.**
+This determines how much the size of a traveler’s **home site** influences their desire to travel.
+
+*   **Smallest (0.0):** Travelers from tiny hamlets are just as likely to go on a trip as those from a massive capital.
+*   **Middle (1.5):** People from larger centers travel more often, perhaps because they have more resources or trade connections.
+*   **End (3.0):** Only the "elite" from the biggest cities ever travel. Small sites become stagnant because their residents never leave to interact with the world.
+
+### Beta Exponent (`beta-exponent`)
+**The "Pull" of the Destination.**
+This is the most important slider for creating dominant centres (one massive settlement that dominates everyone else). It determines how much travelers are attracted to **big, important sites.**
+
+*   **Smallest (0.0):** Travelers don't care about the size of the destination. They are just as likely to visit a small place as a large place (if the distance is the same).
+*   **Middle (1.5):** This is the "sweet spot" for a realistic hierarchy. People prefer bigger sites, but still visit smaller ones.
+*   **End (3.0):** The "Rich get Richer." Travelers are obsessed with the biggest site on the map. This creates a "Winner-Take-All" scenario where one site balloons in size and every other site shrinks to nothing.
+
+### Distance Decay Lambda (`distance-decay-lambda`)
+**The "Pain" of Travel.**
+This represents how much the physical distance discourages travel.
+
+*   **Smallest (0.0001):** "The World is Flat." People don't care about distance. A site on the other side of the map is just as attractive as the one next door. This leads to global, widespread networks.
+*   **Middle (0.001):** Travelers prefer local trips but will occasionally make a long trek to a major city.
+*   **End (0.005+):** "Isolated Valleys." Travel is so exhausting that people only visit their immediate neighbors. The map stays fragmented into tiny, local clusters.
+
+**nb** The precise slider setting to achieve these effects is very much impacted by the scale of the underlying map. Best to think of it as small / middle/ large decay lambda 
+
+### Gamma (`gamma`)
+**The "Volatility" of Growth.**
+This determines how quickly a site’s physical size/importance responds to the number of visitors it gets.
+
+*   **Smallest (0.0):** "The Traditional World." No matter how many people visit a site, it never grows. The landscape is frozen in time.
+*   **Middle (1.5):** Steady growth. If a site becomes a popular trade hub, it grows into a city over a reasonable amount of time.
+*   **End (3.0):** "Boom or Bust." Sites grow or shrink at terrifying speeds. A small spike in tourism makes a village a metropolis overnight; a small lull makes it a ghost town.
+
+### Social Weight (`social-weight`)
+**The "Maintenance Cost" of a City.**
+This represents the "Tax" or "Overhead" required to keep a site important. Large sites need a constant stream of visitors just to stay the same size.
+
+*   **Smallest (0.0):** No maintenance. Once a site becomes big, it stays big forever, even if everyone stops visiting.
+*   **Middle (1.0):** Realistic balance. Large cities must work to stay relevant by attracting visitors, or they will slowly decline.
+*   **End (2.0):** "High Overhead." It is extremely difficult for cities to survive. Unless a site is flooded with a massive, non-stop crowd, it will quickly wither away and shrink.
+
+### Movement Probability (`movement-probability`)
+**The "Activity Level" of the Population.**
+This is simply a measure of how "busy" the people are.
+
+*   **Smallest (0):** Everyone stays home. Nothing happens.
+*   **Middle (50):** A balanced simulation where people move around frequently enough to see patterns emerge within a few hundred ticks.
+*   **End (100):** Constant movement. The simulation runs very fast, and the "Color Diffusion" (cultural influence) spreads across the map almost instantly.
+
+---
+
+### Summary of Likely Scenarios
+
+*   **To create a large connected component:** Set `beta-exponent` high and `distance-decay` low. One city will eat the whole map.
+*   **To create a landscape of equal villages:** Set `beta-exponent` low  and `social-weight` high. No one can ever get big enough to dominate.
+*   **To create isloated pockets:** Set `distance-decay` very high and `beta-exponent` high.
+
 
 ---
 
@@ -2037,106 +2101,56 @@ Collect the following reporters at the end of each run. These should be defined 
   </linkShapes>
   <previewCommands>setup repeat 75 [ go ]</previewCommands>
   <experiments>
-    <experiment name="tiber-stage1" repetitions="3" sequentialRunOrder="true" runMetricsEveryStep="false">
+    <experiment name="hoja-bare" repetitions="1" sequentialRunOrder="true" runMetricsEveryStep="false">
+      <setup>ca
+setup</setup>
+      <go>go</go>
+      <exitCondition><![CDATA[ticks >= 5000]]></exitCondition>
+      <runMetricsCondition><![CDATA[ticks >= 1000]]></runMetricsCondition>
+      <metrics>
+        <metric>count-unique-site-colors</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="alpha-exponent">
+          <value value="0.5"></value>
+          <value value="1"></value>
+          <value value="1.5"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="beta-exponent">
+          <value value="0.5"></value>
+          <value value="1"></value>
+          <value value="1.5"></value>
+          <value value="2"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="distance-decay-lambda">
+          <value value="0"></value>
+          <value value="0.002"></value>
+          <value value="0.005"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="social-weight">
+          <value value="0.6"></value>
+          <value value="1"></value>
+          <value value="1.4"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="gamma">
+          <value value="5"></value>
+          <value value="15"></value>
+          <value value="30"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="movement-probability">
+          <value value="50"></value>
+        </enumeratedValueSet>
+      </constants>
+    </experiment>
+    <experiment name="tiber-bare" repetitions="1" sequentialRunOrder="true" runMetricsEveryStep="false">
       <setup>ca
 setup-map
 setup-settlements
 cleanup-duplicate-sites
 reset-ticks</setup>
       <go>go</go>
-      <exitCondition><![CDATA[ticks >= 3000]]></exitCondition>
-      <metrics>
-        <metric>count-unique-site-colors</metric>
-        <metric>ticks</metric>
-        <metric>max [importance] of sites</metric>
-        <metric>mean [importance] of sites</metric>
-        <metric>standard-deviation [importance] of sites</metric>
-        <metric><![CDATA[count sites with [importance > (mean [importance] of sites * 2)]]]></metric>
-        <metric><![CDATA[count connections with [travel-count > 0.1]]]></metric>
-      </metrics>
-      <constants>
-        <enumeratedValueSet variable="alpha-exponent">
-          <value value="0.5"></value>
-          <value value="1"></value>
-          <value value="1.5"></value>
-        </enumeratedValueSet>
-        <enumeratedValueSet variable="beta-exponent">
-          <value value="0.5"></value>
-          <value value="1"></value>
-          <value value="1.5"></value>
-          <value value="2"></value>
-        </enumeratedValueSet>
-        <enumeratedValueSet variable="distance-decay-lambda">
-          <value value="0.01"></value>
-          <value value="0.05"></value>
-          <value value="0.1"></value>
-        </enumeratedValueSet>
-        <enumeratedValueSet variable="social-weight">
-          <value value="0.6"></value>
-          <value value="1"></value>
-          <value value="1.4"></value>
-        </enumeratedValueSet>
-        <enumeratedValueSet variable="gamma">
-          <value value="5"></value>
-          <value value="15"></value>
-          <value value="30"></value>
-        </enumeratedValueSet>
-        <enumeratedValueSet variable="movement-probability">
-          <value value="50"></value>
-        </enumeratedValueSet>
-      </constants>
-    </experiment>
-    <experiment name="hoja-stage1" repetitions="3" sequentialRunOrder="true" runMetricsEveryStep="false">
-      <setup>ca
-setup</setup>
-      <go>go</go>
-      <exitCondition><![CDATA[ticks >= 3000]]></exitCondition>
-      <metrics>
-        <metric>count-unique-site-colors</metric>
-        <metric>ticks</metric>
-        <metric>max [importance] of sites</metric>
-        <metric>mean [importance] of sites</metric>
-        <metric>standard-deviation [importance] of sites</metric>
-        <metric><![CDATA[count sites with [importance > (mean [importance] of sites * 2)]]]></metric>
-        <metric><![CDATA[count connections with [travel-count > 0.1]]]></metric>
-      </metrics>
-      <constants>
-        <enumeratedValueSet variable="alpha-exponent">
-          <value value="0.5"></value>
-          <value value="1"></value>
-          <value value="1.5"></value>
-        </enumeratedValueSet>
-        <enumeratedValueSet variable="beta-exponent">
-          <value value="0.5"></value>
-          <value value="1"></value>
-          <value value="1.5"></value>
-          <value value="2"></value>
-        </enumeratedValueSet>
-        <enumeratedValueSet variable="distance-decay-lambda">
-          <value value="0.01"></value>
-          <value value="0.05"></value>
-          <value value="0.1"></value>
-        </enumeratedValueSet>
-        <enumeratedValueSet variable="social-weight">
-          <value value="0.6"></value>
-          <value value="1"></value>
-          <value value="1.4"></value>
-        </enumeratedValueSet>
-        <enumeratedValueSet variable="gamma">
-          <value value="5"></value>
-          <value value="15"></value>
-          <value value="30"></value>
-        </enumeratedValueSet>
-        <enumeratedValueSet variable="movement-probability">
-          <value value="50"></value>
-        </enumeratedValueSet>
-      </constants>
-    </experiment>
-    <experiment name="hoja-bare" repetitions="1" sequentialRunOrder="true" runMetricsEveryStep="false">
-      <setup>ca
-setup</setup>
-      <go>go</go>
       <exitCondition><![CDATA[ticks >= 5000]]></exitCondition>
+      <runMetricsCondition><![CDATA[ticks >= 1000]]></runMetricsCondition>
       <metrics>
         <metric>count-unique-site-colors</metric>
       </metrics>
@@ -2153,9 +2167,9 @@ setup</setup>
           <value value="2"></value>
         </enumeratedValueSet>
         <enumeratedValueSet variable="distance-decay-lambda">
-          <value value="0.01"></value>
-          <value value="0.05"></value>
-          <value value="0.1"></value>
+          <value value="0"></value>
+          <value value="0.002"></value>
+          <value value="0.005"></value>
         </enumeratedValueSet>
         <enumeratedValueSet variable="social-weight">
           <value value="0.6"></value>
